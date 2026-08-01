@@ -22,6 +22,7 @@ from app.api import (
     users,
     servers,
     billing,
+    payments,
     accounts,
     copytrading,
     statistics,
@@ -35,6 +36,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 from app.services.ssh_service import init_ssh_service
 from app.services.billing_service import init_billing_service
 from app.services.nowpayments_service import init_nowpayments_service
+from app.services.payment_service import init_payment_service
 from app.services.auth_enhancement_service import init_auth_enhancement_service
 from app.services.alert_engine import alert_engine
 from app.services.notification_service import notification_service
@@ -141,6 +143,15 @@ async def lifespan(app: FastAPI):
         )
         logger.info("NOWPayments service initialized")
 
+    if settings.PAYMENT_API_KEY:
+        init_payment_service(
+            settings.PAYMENT_API_KEY,
+            settings.PAYMENT_BASE_URL,
+            settings.PAYMENT_GATEWAY,
+            settings.PAYMENT_WEBHOOK_SECRET,
+        )
+        logger.info("1ai-payment service initialized")
+
     init_auth_enhancement_service(
         smtp_host=settings.SMTP_HOST,
         smtp_port=settings.SMTP_PORT,
@@ -213,6 +224,9 @@ app.include_router(
 )
 app.include_router(servers.router, prefix="/api/v1/servers", tags=["Servers"])
 app.include_router(billing.router, prefix="/api/v1/billing", tags=["Billing"])
+app.include_router(
+    payments.router, prefix="/api/v1/payments", tags=["Payments"]
+)
 app.include_router(accounts.router, prefix="/api/v1/accounts", tags=["MT5 Accounts"])
 app.include_router(copytrading.router, prefix="/api/v1/copy", tags=["Copy Trading"])
 app.include_router(

@@ -108,6 +108,7 @@ All configuration is environment-based, defined in `backend/app/config.py`
 | `MT5_IMAGE` | `lprett/mt5linux:mt5-installed` | Docker image for MT5 instances |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | — | Enable Stripe billing when set |
 | `NOWPAYMENTS_API_KEY` / `NOWPAYMENTS_IPN_SECRET` | — | Enable NOWPayments crypto payments when set |
+| `PAYMENT_API_KEY` / `PAYMENT_BASE_URL` / `PAYMENT_WEBHOOK_SECRET` / `PAYMENT_GATEWAY` | — | Enable 1ai-payment aggregator (multi-gateway) when set |
 | `SMTP_HOST` / `SMTP_USER` / `SMTP_PASSWORD` / `FROM_EMAIL` | — | Email verification / password reset |
 | `TELEGRAM_*`, `WEBHOOK_*`, `REDIS_*`, `RATE_LIMIT_PER_MINUTE`, `CORS_ORIGINS` | — | Notifications, rate limiting, Redis, CORS |
 
@@ -125,7 +126,7 @@ All routes are under `/api/v1`, mounted in `backend/app/main.py`:
 - `stats` — trading statistics, equity curves, symbol breakdown
 - `notifications`, `webhooks` — Telegram, alert rules, TradingView/custom webhooks
 - `servers` — multi-server SSH management
-- `billing` — Stripe subscriptions, invoices, usage; NOWPayments crypto payments
+- `billing` — Stripe subscriptions, invoices, usage; NOWPayments crypto payments; 1ai-payment aggregator (multi-gateway)
 - `admin` — admin management
 
 ## Testing & Build
