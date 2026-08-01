@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, getToken } from './client'
 
 export interface ServerMetricsHistory {
   id: number
@@ -54,7 +54,8 @@ export interface InstanceMetric {
 }
 
 export interface Alert {
-  id: number
+  // Backend alert ids are the triggering rule id (string), not a numeric row id.
+  id: string
   type: string
   message: string
   severity: 'info' | 'warning' | 'critical'
@@ -77,7 +78,11 @@ export const monitoringApi = {
     api.get<InstanceMetricsHistory[]>(`/monitoring/instances/${instanceId}/metrics?hours=${hours}`),
 
   connectMetricsStream: (onMessage: (data: any) => void) => {
-    const ws = new WebSocket(`ws://${window.location.host}/api/v1/monitoring/stream`)
+    // Backend reads ?token= first, else Bearer; missing token closes with 4401.
+    const token = getToken()
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const url = `${protocol}://${window.location.host}/api/v1/monitoring/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    const ws = new WebSocket(url)
     ws.onmessage = (event) => {
       onMessage(JSON.parse(event.data))
     }

@@ -23,7 +23,7 @@ export interface ServerHealth {
     containers: Array<{ name: string; status: string }>
     containers_total: number
     containers_running: number
-  }
+  } | null
   instances: Array<{
     id: string
     name: string

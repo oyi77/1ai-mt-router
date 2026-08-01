@@ -1,14 +1,12 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
-import { Instance, InstanceStats } from '@/api/instances'
+import { Instance } from '@/api/instances'
 import { Play, Square, RotateCcw, Trash2, Monitor, Terminal, Loader2 } from 'lucide-react'
 
 interface InstanceCardProps {
   instance: Instance
-  stats?: InstanceStats
   isActionLoading?: boolean
   onStart?: () => void
   onStop?: () => void
@@ -22,7 +20,6 @@ interface InstanceCardProps {
 
 export function InstanceCard({
   instance,
-  stats,
   isActionLoading = false,
   onStart,
   onStop,
@@ -38,6 +35,9 @@ export function InstanceCard({
     stopped: 'destructive',
     restarting: 'warning',
     created: 'secondary',
+    exited: 'destructive',
+    paused: 'warning',
+    dead: 'destructive',
   } as const
 
   const statusDotClass = {
@@ -45,6 +45,9 @@ export function InstanceCard({
     stopped: 'status-stopped',
     restarting: 'status-restarting',
     created: 'bg-gray-500',
+    exited: 'bg-red-500',
+    paused: 'bg-amber-500',
+    dead: 'bg-red-500',
   }
 
   return (
@@ -62,35 +65,8 @@ export function InstanceCard({
         <p className="text-xs text-muted-foreground font-mono mt-1">{instance.id.substring(0, 12)}</p>
       </CardHeader>
       <CardContent className="space-y-4">
-        {stats && (
-          <div className="space-y-3">
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-muted-foreground">CPU</span>
-                <span>{stats.cpu_percent.toFixed(1)}%</span>
-              </div>
-              <Progress
-                value={stats.cpu_percent}
-                variant={stats.cpu_percent > 80 ? 'danger' : stats.cpu_percent > 50 ? 'warning' : 'default'}
-                className="h-2"
-              />
-            </div>
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-muted-foreground">Memory</span>
-                <span>{stats.memory_usage_mb.toFixed(0)} / {stats.memory_limit_mb.toFixed(0)} MB</span>
-              </div>
-              <Progress
-                value={stats.memory_percent}
-                variant={stats.memory_percent > 80 ? 'danger' : stats.memory_percent > 50 ? 'warning' : 'default'}
-                className="h-2"
-              />
-            </div>
-          </div>
-        )}
-
         <div className="flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-          {instance.status === 'stopped' && onStart && (
+          {(instance.status === 'stopped' || instance.status === 'exited') && onStart && (
             <Button size="sm" variant="outline" onClick={onStart} disabled={isActionLoading}>
               {isActionLoading ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Play className="h-4 w-4 mr-1" />}
               Start

@@ -1,14 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { authApi } from '@/api/auth'
-
-interface User {
-  id: string
-  username: string
-  role: string
-}
+import { authApi, TwoFactorRequiredError } from '@/api/auth'
+import type { AuthUser } from '@/api/auth'
+import { getToken, setToken, clearToken } from '@/api/client'
 
 interface AuthContextType {
-  user: User | null
+  user: AuthUser | null
   isAuthenticated: boolean
   isLoading: boolean
   login: (username: string, password: string) => Promise<void>
@@ -18,32 +14,39 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<AuthUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    const token = localStorage.getItem('token')
+    const token = getToken()
     if (token) {
       authApi.getMe()
         .then(setUser)
-        .catch(() => {
-          localStorage.removeItem('token')
-        })
+        .catch(clearToken)
         .finally(() => setIsLoading(false))
     } else {
       setIsLoading(false)
     }
   }, [])
 
-  const login = async (username: string, password: string) => {
-    const response = await authApi.login(username, password)
-    localStorage.setItem('token', response.access_token)
+  const login = async (username: string, password: string, twoFactorCode?: string) => {
+    const response = await authApi.login(username, password, twoFactorCode)
+    if (response.requires_2fa) {
+      throw new TwoFactorRequiredError('Enter your 2FA code')
+    }
+    if (response.requires_verification) {
+      throw new Error('Please verify your email before signing in')
+    }
+    if (!response.access_token) {
+      throw new Error('Login failed')
+    }
+    setToken(response.access_token)
     const userData = await authApi.getMe()
     setUser(userData)
   }
 
   const logout = () => {
-    localStorage.removeItem('token')
+    clearToken()
     setUser(null)
   }
 

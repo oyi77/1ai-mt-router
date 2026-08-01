@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional, List
+from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional, List, Literal
 from pydantic import BaseModel
 from datetime import datetime
 
-from app.auth.jwt import get_current_user
+from app.auth.jwt import get_current_user_or_api_key
 from app.services.notification_service import notification_service
 from app.services.alert_engine import alert_engine, AlertRule, AlertType, AlertCondition
 
@@ -26,7 +26,7 @@ class AlertRuleCreate(BaseModel):
     symbol: Optional[str]
     condition: AlertCondition
     value: float
-    channel: str = "telegram"
+    channel: Literal["telegram", "webhook"] = "telegram"
     cooldown_seconds: int = 300
 
 
@@ -42,13 +42,13 @@ class AlertRuleResponse(BaseModel):
 
 
 @router.post("/telegram/configure")
-async def configure_telegram(config: TelegramConfig, user=Depends(get_current_user)):
+async def configure_telegram(config: TelegramConfig, user=Depends(get_current_user_or_api_key)):
     notification_service.configure_telegram(config.bot_token, config.chat_id)
     return {"status": "configured", "message": "Telegram bot configured successfully"}
 
 
 @router.post("/telegram/test")
-async def test_telegram(user=Depends(get_current_user)):
+async def test_telegram(user=Depends(get_current_user_or_api_key)):
     success = await notification_service.send_telegram(
         "🧪 <b>MT5 Router Test</b>\nTelegram notifications are working!"
     )
@@ -56,18 +56,21 @@ async def test_telegram(user=Depends(get_current_user)):
 
 
 @router.post("/webhooks")
-async def add_webhook(config: WebhookConfig, user=Depends(get_current_user)):
-    notification_service.add_webhook(config.name, config.url, config.events)
+async def add_webhook(config: WebhookConfig, user=Depends(get_current_user_or_api_key)):
+    try:
+        notification_service.add_webhook(config.name, config.url, config.events)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"status": "added", "name": config.name}
 
 
 @router.get("/webhooks")
-async def list_webhooks(user=Depends(get_current_user)):
+async def list_webhooks(user=Depends(get_current_user_or_api_key)):
     return notification_service.webhook_urls
 
 
 @router.delete("/webhooks/{name}")
-async def delete_webhook(name: str, user=Depends(get_current_user)):
+async def delete_webhook(name: str, user=Depends(get_current_user_or_api_key)):
     if name in notification_service.webhook_urls:
         del notification_service.webhook_urls[name]
         return {"status": "deleted"}
@@ -75,7 +78,7 @@ async def delete_webhook(name: str, user=Depends(get_current_user)):
 
 
 @router.post("/alerts")
-async def create_alert(rule: AlertRuleCreate, user=Depends(get_current_user)):
+async def create_alert(rule: AlertRuleCreate, user=Depends(get_current_user_or_api_key)):
     import uuid
 
     alert_id = str(uuid.uuid4())[:8]
@@ -107,7 +110,7 @@ async def create_alert(rule: AlertRuleCreate, user=Depends(get_current_user)):
 
 
 @router.get("/alerts")
-async def list_alerts(user=Depends(get_current_user)):
+async def list_alerts(user=Depends(get_current_user_or_api_key)):
     user_rules = [
         {
             "id": rule_id,
@@ -127,9 +130,10 @@ async def list_alerts(user=Depends(get_current_user)):
 
 @router.put("/alerts/{alert_id}")
 async def update_alert(
-    alert_id: str, is_active: Optional[bool] = None, user=Depends(get_current_user)
+    alert_id: str, is_active: Optional[bool] = None, user=Depends(get_current_user_or_api_key)
 ):
-    if alert_id not in alert_engine.rules:
+    rule = alert_engine.rules.get(alert_id)
+    if not rule or rule.user_id != user.id:
         raise HTTPException(status_code=404, detail="Alert not found")
 
     if is_active is not None:
@@ -139,14 +143,17 @@ async def update_alert(
 
 
 @router.delete("/alerts/{alert_id}")
-async def delete_alert(alert_id: str, user=Depends(get_current_user)):
+async def delete_alert(alert_id: str, user=Depends(get_current_user_or_api_key)):
+    rule = alert_engine.rules.get(alert_id)
+    if not rule or rule.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Alert not found")
     alert_engine.remove_rule(alert_id)
     return {"status": "deleted"}
 
 
 @router.post("/test")
 async def send_test_notification(
-    channel: str = "telegram", user=Depends(get_current_user)
+    channel: str = "telegram", user=Depends(get_current_user_or_api_key)
 ):
     results = await notification_service.notify(
         event="test",

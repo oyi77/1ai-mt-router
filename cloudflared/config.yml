@@ -16,7 +16,10 @@
 # cloudflared tunnel route dns mt5-router "*.mt-oc.aitradepulse.com"
 
 tunnel: mt5-router
-credentials-file: /root/.cloudflared/your-tunnel-uuid.json
+# cloudflared expands ${TUNNEL_UUID} from the environment at startup, so the
+# tunnel UUID never needs to be committed here. Obtain it with:
+#   export TUNNEL_UUID=$(cloudflared tunnel list | awk '/mt5-router/ {print $1}')
+credentials-file: /root/.cloudflared/${TUNNEL_UUID}.json
 
 # Ingress rules - order matters! First match wins
 ingress:

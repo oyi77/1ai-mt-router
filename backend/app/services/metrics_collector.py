@@ -1,9 +1,11 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 
 from app.core.database import SessionLocal
-from app.models.database import InstanceMetrics, ServerMetrics
+from app.core.docker_client import get_docker_client
+from app.models.database import Instance, InstanceMetrics, ServerMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -13,15 +15,13 @@ _collector_task = None
 async def _collect_instance_metrics():
     """Collect metrics from all running MT5 Docker containers and persist them."""
     try:
-        import docker
-
-        client = docker.from_env()
+        client = get_docker_client()
     except Exception as e:
         logger.warning(f"Could not connect to Docker daemon: {e}")
         return
 
-    containers = client.containers.list(
-        filters={"label": "mt5-router.instance"}
+    containers = await asyncio.to_thread(
+        client.containers.list, filters={"label": "mt5-router.instance"}
     )
 
     if not containers:
@@ -33,7 +33,7 @@ async def _collect_instance_metrics():
             if container.status != "running":
                 continue
             try:
-                stats = container.stats(stream=False)
+                stats = await asyncio.to_thread(container.stats, stream=False)
 
                 cpu_delta = (
                     stats["cpu_stats"]["cpu_usage"]["total_usage"]
@@ -43,9 +43,7 @@ async def _collect_instance_metrics():
                     stats["cpu_stats"]["system_cpu_usage"]
                     - stats["precpu_stats"]["system_cpu_usage"]
                 )
-                cpu_percent = (
-                    (cpu_delta / system_delta * 100.0) if system_delta > 0 else 0
-                )
+                cpu_percent = max(0.0, cpu_delta / system_delta * 100.0) if system_delta > 0 else 0
 
                 memory_usage = stats["memory_stats"].get("usage", 0)
                 memory_limit = stats["memory_stats"].get("limit", 1)
@@ -62,9 +60,19 @@ async def _collect_instance_metrics():
                     net.get("tx_bytes", 0) for net in networks.values()
                 )
 
+                # Resolve the DB instance by full container id so persisted
+                # metrics key off the same instance id the API uses.
+                instance = (
+                    db.query(Instance)
+                    .filter(Instance.docker_container_id == container.id)
+                    .first()
+                )
+                instance_id = instance.id if instance else container.id[:12]
+                instance_name = instance.name if instance else container.name
+
                 metric = InstanceMetrics(
-                    instance_id=container.id[:12],
-                    instance_name=container.name,
+                    instance_id=instance_id,
+                    instance_name=instance_name,
                     cpu_percent=round(cpu_percent, 2),
                     memory_usage_mb=round(memory_usage / 1024 / 1024, 2),
                     memory_limit_mb=round(memory_limit / 1024 / 1024, 2),
@@ -117,7 +125,7 @@ async def _cleanup_old_metrics(retention_days: int = 7):
 
 
 async def _metrics_loop(interval: int):
-    """Main loop that collects metrics and cleans up old records perioditely."""
+    """Main loop that collects metrics and cleans up old records periodically."""
     logger.info(
         f"Metrics collector started (interval={interval}s, retention=7 days)"
     )
@@ -134,12 +142,20 @@ async def _metrics_loop(interval: int):
 def start_metrics_collector(interval: int = 60):
     """Start the background metrics collector task.
 
+    Only the ``worker`` process role runs the collector; other roles (e.g.
+    the API server) skip it so each process does not collect duplicate data.
+
     Args:
         interval: Collection interval in seconds (default 60).
 
     Returns:
-        The asyncio Task running the collector loop.
+        The asyncio Task running the collector loop, or None if skipped.
     """
+    role = os.environ.get("ROLE", "").strip().lower()
+    if role and role != "worker":
+        logger.info(f"Skipping metrics collector startup (ROLE={role!r}, not 'worker')")
+        return None
+
     global _collector_task
     if _collector_task is not None and not _collector_task.done():
         logger.warning("Metrics collector is already running")

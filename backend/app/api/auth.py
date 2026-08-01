@@ -1,20 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import bcrypt
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
 
+from app.config import settings
 from app.core.database import get_db
 from app.models.database import User
 from app.auth.jwt import create_access_token, verify_token
-from app.services.auth_enhancement_service import auth_enhancement_service
+from app.services import auth_enhancement_service
+from app.services.encryption import encryption_service
 
 router = APIRouter()
 
 
 class RegisterRequest(BaseModel):
-    email: str
+    email: EmailStr
     username: str
     password: str
     full_name: Optional[str] = None
@@ -27,7 +29,7 @@ class LoginRequest(BaseModel):
 
 
 class ForgotPasswordRequest(BaseModel):
-    email: str
+    email: EmailStr
 
 
 class ResetPasswordRequest(BaseModel):
@@ -56,32 +58,43 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
         .first()
     )
 
-    if not user or not bcrypt.checkpw(
-        request.password.encode("utf-8"), user.hashed_password.encode("utf-8")
-    ):
-        if user:
-            user.failed_login_attempts += 1
-            if auth_enhancement_service:
-                lockout = auth_enhancement_service.calculate_lockout(
-                    user.failed_login_attempts
-                )
-                if lockout:
-                    user.locked_until = lockout
-            db.commit()
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if user.locked_until and user.locked_until > datetime.utcnow():
         raise HTTPException(status_code=423, detail="Account temporarily locked")
 
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if not bcrypt.checkpw(
+        request.password.encode("utf-8"), user.hashed_password.encode("utf-8")
+    ):
+        user.failed_login_attempts += 1
+        if auth_enhancement_service.auth_enhancement_service:
+            lockout = auth_enhancement_service.auth_enhancement_service.calculate_lockout(
+                user.failed_login_attempts
+            )
+            if lockout:
+                user.locked_until = lockout
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
     if user.two_factor_enabled:
         if not request.two_factor_code:
             return {"requires_2fa": True, "message": "Enter 2FA code"}
 
-        if auth_enhancement_service:
-            if not auth_enhancement_service.verify_2fa_token(
-                user.two_factor_secret, request.two_factor_code
-            ):
-                raise HTTPException(status_code=401, detail="Invalid 2FA code")
+        try:
+            secret = encryption_service.decrypt(user.two_factor_secret)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid 2FA code")
+
+        if not auth_enhancement_service.auth_enhancement_service or not (
+            auth_enhancement_service.auth_enhancement_service.verify_2fa_token(
+                secret, request.two_factor_code
+            )
+        ):
+            raise HTTPException(status_code=401, detail="Invalid 2FA code")
 
     if not user.is_verified:
         return {"requires_verification": True, "message": "Please verify your email"}
@@ -98,6 +111,7 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
+        "expires_in": settings.JWT_EXPIRATION_HOURS * 3600,
         "user": {
             "id": user.id,
             "email": user.email,
@@ -120,9 +134,11 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     verification_expires = None
     is_verified = True
 
-    if auth_enhancement_service:
+    email_configured = bool(settings.SMTP_HOST and settings.FROM_EMAIL)
+
+    if email_configured and auth_enhancement_service.auth_enhancement_service:
         verification_token, verification_expires = (
-            auth_enhancement_service.generate_verification_token()
+            auth_enhancement_service.auth_enhancement_service.generate_verification_token()
         )
         is_verified = False
 
@@ -141,8 +157,8 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    if auth_enhancement_service and verification_token:
-        await auth_enhancement_service.send_verification_email(
+    if email_configured and auth_enhancement_service.auth_enhancement_service and verification_token:
+        await auth_enhancement_service.auth_enhancement_service.send_verification_email(
             user.email, verification_token
         )
 
@@ -189,13 +205,13 @@ async def forgot_password(
     if not user:
         return {"message": "If the email exists, a reset link has been sent"}
 
-    if auth_enhancement_service:
-        reset_token, reset_expires = auth_enhancement_service.generate_reset_token()
+    if auth_enhancement_service.auth_enhancement_service:
+        reset_token, reset_expires = auth_enhancement_service.auth_enhancement_service.generate_reset_token()
         user.reset_token = reset_token
         user.reset_token_expires = reset_expires
         db.commit()
 
-        await auth_enhancement_service.send_password_reset_email(
+        await auth_enhancement_service.auth_enhancement_service.send_password_reset_email(
             user.email, reset_token
         )
 
@@ -230,7 +246,7 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
 
 @router.post("/2fa/setup")
 async def setup_2fa(user: dict = Depends(verify_token), db: Session = Depends(get_db)):
-    if not auth_enhancement_service:
+    if not auth_enhancement_service.auth_enhancement_service:
         raise HTTPException(status_code=500, detail="2FA not configured")
 
     db_user = db.query(User).filter(User.id == int(user["sub"])).first()
@@ -240,10 +256,10 @@ async def setup_2fa(user: dict = Depends(verify_token), db: Session = Depends(ge
     if db_user.two_factor_enabled:
         raise HTTPException(status_code=400, detail="2FA already enabled")
 
-    secret = auth_enhancement_service.generate_2fa_secret()
-    qr_uri = auth_enhancement_service.get_2fa_uri(secret, db_user.email)
+    secret = auth_enhancement_service.auth_enhancement_service.generate_2fa_secret()
+    qr_uri = auth_enhancement_service.auth_enhancement_service.get_2fa_uri(secret, db_user.email)
 
-    db_user.two_factor_secret = secret
+    db_user.two_factor_secret = encryption_service.encrypt(secret)
     db.commit()
 
     return {
@@ -259,7 +275,7 @@ async def verify_2fa(
     user: dict = Depends(verify_token),
     db: Session = Depends(get_db),
 ):
-    if not auth_enhancement_service:
+    if not auth_enhancement_service.auth_enhancement_service:
         raise HTTPException(status_code=500, detail="2FA not configured")
 
     db_user = db.query(User).filter(User.id == int(user["sub"])).first()
@@ -271,16 +287,19 @@ async def verify_2fa(
             status_code=400, detail="2FA not set up. Call /2fa/setup first"
         )
 
-    if not auth_enhancement_service.verify_2fa_token(
-        db_user.two_factor_secret, request.code
-    ):
+    try:
+        secret = encryption_service.decrypt(db_user.two_factor_secret)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid code. Try again.")
+
+    if not auth_enhancement_service.auth_enhancement_service.verify_2fa_token(secret, request.code):
         raise HTTPException(status_code=400, detail="Invalid code. Try again.")
 
     db_user.two_factor_enabled = True
     db.commit()
 
-    if auth_enhancement_service:
-        await auth_enhancement_service.send_2fa_enabled_email(db_user.email)
+    if auth_enhancement_service.auth_enhancement_service:
+        await auth_enhancement_service.auth_enhancement_service.send_2fa_enabled_email(db_user.email)
 
     return {"status": "enabled", "message": "2FA enabled successfully"}
 

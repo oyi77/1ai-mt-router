@@ -1,5 +1,4 @@
 from sqlalchemy import (
-    create_engine,
     Column,
     Integer,
     String,
@@ -8,10 +7,9 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Text,
-    Enum,
 )
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 
@@ -55,7 +53,7 @@ class User(Base):
 
     # Two-factor authentication
     two_factor_enabled = Column(Boolean, default=False)
-    two_factor_secret = Column(String(32))
+    two_factor_secret = Column(Text)
 
     # Phone verification
     phone_number = Column(String(20))
@@ -83,7 +81,7 @@ class ApiKey(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(64), unique=True, index=True, nullable=False)
     name = Column(String(100))
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     permissions = Column(Text)
     is_active = Column(Boolean, default=True)
     rate_limit = Column(Integer, default=100)
@@ -99,8 +97,8 @@ class Instance(Base):
 
     id = Column(String(50), primary_key=True)
     name = Column(String(100))
-    user_id = Column(Integer, ForeignKey("users.id"))
-    server_id = Column(Integer, ForeignKey("ssh_servers.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    server_id = Column(Integer, ForeignKey("ssh_servers.id"), index=True)
     docker_container_id = Column(String(100))
     status = Column(String(20))
     rpyc_port = Column(Integer)
@@ -118,16 +116,16 @@ class MT5Account(Base):
     __tablename__ = "mt5_accounts"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    instance_id = Column(String(50), ForeignKey("instances.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    instance_id = Column(String(50), ForeignKey("instances.id"), index=True)
 
-    login = Column(String(50), nullable=False)
-    server = Column(String(100), nullable=False)
+    login = Column(String(50))
+    server = Column(String(100))
     broker = Column(String(100))
     account_name = Column(String(255))
     is_demo = Column(Boolean, default=True)
 
-    encrypted_password = Column(Text, nullable=False)
+    encrypted_password = Column(Text)
 
     connection_status = Column(String(20), default="disconnected")
     connection_error = Column(Text)
@@ -145,8 +143,8 @@ class Alert(Base):
     __tablename__ = "alerts"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    instance_id = Column(String(50))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    instance_id = Column(String(50), index=True)
     alert_type = Column(String(50))
     condition = Column(Text)
     channel = Column(String(50))
@@ -174,8 +172,8 @@ class UsageRecord(Base):
     __tablename__ = "usage_records"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    api_key_id = Column(Integer)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    api_key_id = Column(Integer, index=True)
     endpoint = Column(String(200))
     method = Column(String(10))
     response_time_ms = Column(Integer)
@@ -187,7 +185,7 @@ class SSHServer(Base):
     __tablename__ = "ssh_servers"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     name = Column(String(100), nullable=False)
     host = Column(String(255), nullable=False)
     port = Column(Integer, default=22)
@@ -212,7 +210,7 @@ class ServerMetrics(Base):
     __tablename__ = "server_metrics"
 
     id = Column(Integer, primary_key=True, index=True)
-    server_id = Column(Integer, ForeignKey("ssh_servers.id"))
+    server_id = Column(Integer, ForeignKey("ssh_servers.id"), index=True)
     cpu_percent = Column(Float)
     memory_total_mb = Column(Float)
     memory_used_mb = Column(Float)
@@ -252,7 +250,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     stripe_invoice_id = Column(String(255))
     amount_cents = Column(Integer)
     currency = Column(String(3), default="usd")
@@ -270,10 +268,10 @@ class CopyStrategy(Base):
     __tablename__ = "copy_strategies"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     name = Column(String(100), nullable=False)
     description = Column(Text)
-    source_account_id = Column(Integer, ForeignKey("mt5_accounts.id"))
+    source_account_id = Column(Integer, ForeignKey("mt5_accounts.id"), index=True)
 
     is_active = Column(Boolean, default=True)
     symbol_filter = Column(Text)
@@ -292,9 +290,9 @@ class CopySubscriber(Base):
     __tablename__ = "copy_subscribers"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    strategy_id = Column(Integer, ForeignKey("copy_strategies.id"))
-    target_account_id = Column(Integer, ForeignKey("mt5_accounts.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    strategy_id = Column(Integer, ForeignKey("copy_strategies.id"), index=True)
+    target_account_id = Column(Integer, ForeignKey("mt5_accounts.id"), index=True)
 
     is_active = Column(Boolean, default=True)
     lot_multiplier = Column(Float, default=1.0)
@@ -313,7 +311,7 @@ class CopySignal(Base):
     __tablename__ = "copy_signals"
 
     id = Column(Integer, primary_key=True, index=True)
-    strategy_id = Column(Integer, ForeignKey("copy_strategies.id"))
+    strategy_id = Column(Integer, ForeignKey("copy_strategies.id"), index=True)
 
     ticket = Column(Integer)
     symbol = Column(String(50))
@@ -335,7 +333,7 @@ class CopyPosition(Base):
     __tablename__ = "copy_positions"
 
     id = Column(Integer, primary_key=True, index=True)
-    subscriber_id = Column(Integer, ForeignKey("copy_subscribers.id"))
+    subscriber_id = Column(Integer, ForeignKey("copy_subscribers.id"), index=True)
 
     provider_ticket = Column(Integer)
     subscriber_ticket = Column(Integer)
@@ -368,7 +366,7 @@ class WebhookConfig(Base):
     __tablename__ = "webhook_configs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
     name = Column(String(100), nullable=False)
     url = Column(String(500), nullable=False)
     secret = Column(String(255))

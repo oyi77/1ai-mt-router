@@ -23,17 +23,18 @@ export function PriceChart({ data, symbol }: PriceChartProps) {
     const minPrice = Math.min(...prices)
     const maxPrice = Math.max(...prices)
     const priceRange = maxPrice - minPrice
-    const padding = priceRange * 0.1
+    const range = priceRange > 0 ? priceRange : 1
+    const padding = range * 0.1
 
-    const candleWidth = (canvas.width - 60) / data.length
+    const candleWidth = Math.max(1, (canvas.width - 60) / data.length)
     const chartHeight = canvas.height - 40
 
     data.forEach((candle, i) => {
       const x = 30 + i * candleWidth
-      const openY = chartHeight - ((candle.open - minPrice + padding) / (priceRange + padding * 2)) * chartHeight
-      const closeY = chartHeight - ((candle.close - minPrice + padding) / (priceRange + padding * 2)) * chartHeight
-      const highY = chartHeight - ((candle.high - minPrice + padding) / (priceRange + padding * 2)) * chartHeight
-      const lowY = chartHeight - ((candle.low - minPrice + padding) / (priceRange + padding * 2)) * chartHeight
+      const openY = chartHeight - ((candle.open - minPrice + padding) / (range + padding * 2)) * chartHeight
+      const closeY = chartHeight - ((candle.close - minPrice + padding) / (range + padding * 2)) * chartHeight
+      const highY = chartHeight - ((candle.high - minPrice + padding) / (range + padding * 2)) * chartHeight
+      const lowY = chartHeight - ((candle.low - minPrice + padding) / (range + padding * 2)) * chartHeight
 
       const isGreen = candle.close >= candle.open
       ctx.strokeStyle = isGreen ? '#22c55e' : '#ef4444'
@@ -45,16 +46,17 @@ export function PriceChart({ data, symbol }: PriceChartProps) {
       ctx.stroke()
 
       const bodyHeight = Math.abs(closeY - openY) || 1
-      ctx.fillRect(x + 2, Math.min(openY, closeY), candleWidth - 4, bodyHeight)
+      ctx.fillRect(x + 2, Math.min(openY, closeY), Math.max(1, candleWidth - 4), bodyHeight)
     })
 
     ctx.fillStyle = '#888'
     ctx.font = '10px monospace'
-    const step = priceRange / 5
+    const step = range / 5
+    const labelDigits = maxPrice >= 100 ? 2 : maxPrice >= 1 ? 4 : 5
     for (let i = 0; i <= 5; i++) {
       const price = minPrice + step * i
       const y = chartHeight - (i / 5) * chartHeight
-      ctx.fillText(price.toFixed(2), 2, y + 3)
+      ctx.fillText(price.toFixed(labelDigits), 2, y + 3)
     }
   }, [data])
 
@@ -64,7 +66,11 @@ export function PriceChart({ data, symbol }: PriceChartProps) {
         <CardTitle>{symbol} Price Chart</CardTitle>
       </CardHeader>
       <CardContent>
-        <canvas ref={canvasRef} width={800} height={400} className="w-full" />
+        {data.length === 0 ? (
+          <p className="text-center text-muted-foreground py-8">No candle data for {symbol}</p>
+        ) : (
+          <canvas ref={canvasRef} width={800} height={400} className="w-full" />
+        )}
       </CardContent>
     </Card>
   )

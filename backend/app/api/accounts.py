@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy.orm import Session
@@ -67,10 +67,10 @@ def account_to_response(account: MT5Account) -> dict:
 @router.post("", response_model=AccountResponse)
 async def create_account(
     request: AccountCreateRequest,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -79,7 +79,7 @@ async def create_account(
     account = MT5Account(
         user_id=user_id,
         login=request.login,
-        password=encrypted_password,
+        encrypted_password=encrypted_password,
         server=request.server,
         broker=request.broker,
         account_name=request.account_name,
@@ -98,9 +98,9 @@ async def create_account(
 
 @router.get("", response_model=List[AccountResponse])
 async def list_accounts(
-    user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    user_id = user.get("sub")
+    user_id = user.id
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -111,10 +111,10 @@ async def list_accounts(
 @router.get("/{account_id}", response_model=AccountResponse)
 async def get_account(
     account_id: int,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
 
     account = (
         db.query(MT5Account)
@@ -132,10 +132,10 @@ async def get_account(
 async def update_account(
     account_id: int,
     request: AccountUpdateRequest,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
 
     account = (
         db.query(MT5Account)
@@ -163,10 +163,10 @@ async def update_account(
 @router.delete("/{account_id}")
 async def delete_account(
     account_id: int,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
 
     account = (
         db.query(MT5Account)
@@ -186,10 +186,10 @@ async def delete_account(
 @router.post("/{account_id}/connect")
 async def connect_account(
     account_id: int,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
 
     account = (
         db.query(MT5Account)
@@ -240,16 +240,16 @@ async def connect_account(
         account.connection_status = "error"
         account.connection_error = str(e)
         db.commit()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to connect to MT5 account")
 
 
 @router.post("/{account_id}/disconnect")
 async def disconnect_account(
     account_id: int,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user_id = user.get("sub")
+    user_id = user.id
 
     account = (
         db.query(MT5Account)

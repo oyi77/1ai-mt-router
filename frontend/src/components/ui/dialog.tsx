@@ -9,6 +9,8 @@ interface DialogProps {
 }
 
 const Dialog: React.FC<DialogProps> = ({ open = false, onOpenChange, children }) => {
+  const [titleId, setTitleId] = React.useState("")
+
   React.useEffect(() => {
     if (open) {
       document.body.style.overflow = "hidden"
@@ -18,16 +20,29 @@ const Dialog: React.FC<DialogProps> = ({ open = false, onOpenChange, children })
     return () => { document.body.style.overflow = "" }
   }, [open])
 
+  React.useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onOpenChange?.(false)
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [open, onOpenChange])
+
   if (!open) return null
 
   return (
-    <DialogContext.Provider value={{ onOpenChange }}>
+    <DialogContext.Provider value={{ onOpenChange, titleId, setTitleId }}>
       {children}
     </DialogContext.Provider>
   )
 }
 
-const DialogContext = React.createContext<{ onOpenChange?: (open: boolean) => void }>({})
+const DialogContext = React.createContext<{
+  onOpenChange?: (open: boolean) => void
+  titleId: string
+  setTitleId: (id: string) => void
+}>({ titleId: "", setTitleId: () => {} })
 
 interface DialogContentProps extends React.HTMLAttributes<HTMLDivElement> {
   children?: React.ReactNode
@@ -35,7 +50,7 @@ interface DialogContentProps extends React.HTMLAttributes<HTMLDivElement> {
 
 const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
   ({ className, children, ...props }, ref) => {
-    const { onOpenChange } = React.useContext(DialogContext)
+    const { onOpenChange, titleId } = React.useContext(DialogContext)
 
     return (
       <div
@@ -45,6 +60,10 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
         <div className="fixed inset-0 bg-black/50 animate-in fade-in-0" />
           <div
           ref={ref}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId || undefined}
+          tabIndex={-1}
           className={cn(
             "relative z-50 bg-background rounded-lg border p-4 sm:p-6 shadow-lg w-full max-w-lg mx-2 sm:mx-4 animate-in fade-in-0 zoom-in-95 max-h-[90vh] overflow-y-auto",
             className
@@ -93,9 +112,18 @@ interface DialogTitleProps extends React.HTMLAttributes<HTMLHeadingElement> {
 
 const DialogTitle = React.forwardRef<HTMLHeadingElement, DialogTitleProps>(
   ({ className, children, ...props }, ref) => {
+    const { setTitleId } = React.useContext(DialogContext)
+    const generatedId = React.useId()
+    const titleId = props.id ?? generatedId
+
+    React.useEffect(() => {
+      setTitleId(titleId)
+    }, [setTitleId, titleId])
+
     return (
       <h2
         ref={ref}
+        id={titleId}
         className={cn("text-lg font-semibold leading-none tracking-tight", className)}
         {...props}
       >

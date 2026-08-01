@@ -42,11 +42,22 @@ setup_environment() {
     
     JWT_SECRET=$(generate_jwt_secret)
     ENCRYPTION_KEY=$(generate_fernet_key)
+    SECRET_KEY=$(generate_jwt_secret)
+
+    # Resolve admin bootstrap defaults (overridable via env vars)
+    ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+    ADMIN_EMAIL="${ADMIN_EMAIL:-admin@mt5router.local}"
+    if [ "$env" = "prod" ]; then
+        ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+    else
+        ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
+    fi
     
     case $env in
         "local")
             cat > .env << EOF
 # MT5 Router - Local Development
+ENV=development
 APP_NAME=MT5 Router (Local)
 APP_VERSION=3.1.0
 DEBUG=true
@@ -55,7 +66,13 @@ PORT=8080
 
 # Security
 JWT_SECRET=$JWT_SECRET
+SECRET_KEY=$SECRET_KEY
 ENCRYPTION_KEY=$ENCRYPTION_KEY
+
+# Admin bootstrap
+ADMIN_USERNAME=$ADMIN_USERNAME
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
 
 # Database (SQLite for local)
 DATABASE_URL=sqlite:///./data/mt5router.db
@@ -82,6 +99,7 @@ EOF
         "dev")
             cat > .env << EOF
 # MT5 Router - Development Server
+ENV=development
 APP_NAME=MT5 Router (Dev)
 APP_VERSION=3.1.0
 DEBUG=true
@@ -90,7 +108,13 @@ PORT=8080
 
 # Security
 JWT_SECRET=$JWT_SECRET
+SECRET_KEY=$SECRET_KEY
 ENCRYPTION_KEY=$ENCRYPTION_KEY
+
+# Admin bootstrap
+ADMIN_USERNAME=$ADMIN_USERNAME
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
 
 # Database (SQLite for dev)
 DATABASE_URL=sqlite:///./data/mt5router.db
@@ -115,8 +139,10 @@ EOF
             ;;
             
         "prod")
+            DB_PASSWORD=$(openssl rand -hex 16)
             cat > .env << EOF
 # MT5 Router - Production
+ENV=production
 APP_NAME=MT5 Router
 APP_VERSION=3.1.0
 DEBUG=false
@@ -125,10 +151,17 @@ PORT=8080
 
 # Security (IMPORTANT: Keep these secret!)
 JWT_SECRET=$JWT_SECRET
+SECRET_KEY=$SECRET_KEY
 ENCRYPTION_KEY=$ENCRYPTION_KEY
 
+# Admin bootstrap (ADMIN_PASSWORD is required for prod, validated in main())
+ADMIN_USERNAME=$ADMIN_USERNAME
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+
 # Database (PostgreSQL for production)
-DATABASE_URL=postgresql://mt5router:$(openssl rand -hex 16)@postgres:5432/mt5router
+DB_PASSWORD=$DB_PASSWORD
+DATABASE_URL=postgresql://mt5router:$DB_PASSWORD@postgres:5432/mt5router
 
 # Docker
 MT5_IMAGE=lprett/mt5linux:mt5-installed
@@ -223,9 +256,21 @@ wait_for_service() {
 }
 
 create_admin_user() {
-    print_info "Creating default admin user..."
-    
+    local env=$1
+    local password="${ADMIN_PASSWORD:-}"
+
+    if [ -z "$password" ]; then
+        print_error "ADMIN_PASSWORD is not set. Refusing to create a passwordless admin user."
+        exit 1
+    fi
+    if [ "$env" = "prod" ] && [ "$password" = "admin123" ]; then
+        print_error "Default password 'admin123' is not allowed for prod. Set ADMIN_PASSWORD to a strong value."
+        exit 1
+    fi
+
+    print_info "Creating admin user..."
     docker-compose exec -T backend python3 -c "
+import os
 from app.models.database import User
 from app.core.database import SessionLocal
 from passlib.context import CryptContext
@@ -233,21 +278,25 @@ from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
 db = SessionLocal()
 
-admin = db.query(User).filter(User.username == 'admin').first()
+username = os.environ.get('ADMIN_USERNAME', 'admin')
+email = os.environ['ADMIN_EMAIL']
+password = os.environ['ADMIN_PASSWORD']
+
+admin = db.query(User).filter(User.username == username).first()
 if not admin:
     admin = User(
-        email='admin@mt5router.local',
-        username='admin',
-        hashed_password=pwd_context.hash('admin123'),
+        email=email,
+        username=username,
+        hashed_password=pwd_context.hash(password),
         role='admin',
         is_active=True,
         is_verified=True
     )
     db.add(admin)
     db.commit()
-    print('Admin user created: admin / admin123')
+    print('Admin user ready: ' + username)
 else:
-    print('Admin user already exists')
+    print('Admin user already exists: ' + username)
 db.close()
 " 2>/dev/null || print_warning "Could not create admin user (you can do this manually)"
 }
@@ -269,9 +318,8 @@ show_summary() {
     echo -e "  Frontend:     ${GREEN}http://localhost:3000${NC}"
     echo -e "  API Docs:     ${GREEN}http://localhost:8080/docs${NC}"
     echo ""
-    echo "Default Admin:"
-    echo -e "  Username: ${YELLOW}admin${NC}"
-    echo -e "  Password: ${YELLOW}admin123${NC}"
+    echo "Admin:"
+    echo -e "  Username: ${YELLOW}${ADMIN_USERNAME:-admin}${NC}"
     echo ""
     echo "Useful Commands:"
     echo "  docker-compose logs -f          # View logs"
@@ -312,6 +360,17 @@ main() {
             exit 1
             ;;
     esac
+
+    if [ "$ENV" = "prod" ]; then
+        if [ -z "${ADMIN_PASSWORD:-}" ]; then
+            print_error "ADMIN_PASSWORD is required for prod (e.g. ADMIN_PASSWORD='...' ./setup.sh prod)"
+            exit 1
+        fi
+        if [ "$ADMIN_PASSWORD" = "admin123" ]; then
+            print_error "Default password 'admin123' is not allowed for prod. Set ADMIN_PASSWORD to a strong value."
+            exit 1
+        fi
+    fi
     
     check_dependencies
     setup_environment $ENV
@@ -319,7 +378,7 @@ main() {
     build_and_run $ENV
     
     if wait_for_service; then
-        create_admin_user
+        create_admin_user $ENV
         show_summary $ENV
     else
         print_error "Setup failed. Check logs with: docker-compose logs"

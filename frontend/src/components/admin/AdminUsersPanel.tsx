@@ -14,6 +14,7 @@ export function AdminUsersPanel() {
   const [search, setSearch] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null)
   const [banTarget, setBanTarget] = useState<AdminUser | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const { data: users = [], isLoading } = useQuery({
     queryKey: ["admin-users"],
@@ -23,7 +24,11 @@ export function AdminUsersPanel() {
   const updateUser = useMutation({
     mutationFn: ({ id, data }: { id: number; data: { role?: string } }) =>
       adminApi.updateUser(id, data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] })
+      setActionError(null)
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const deleteUser = useMutation({
@@ -31,7 +36,9 @@ export function AdminUsersPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] })
       setDeleteTarget(null)
+      setActionError(null)
     },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const banUser = useMutation({
@@ -39,12 +46,18 @@ export function AdminUsersPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-users"] })
       setBanTarget(null)
+      setActionError(null)
     },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const unbanUser = useMutation({
     mutationFn: (id: number) => adminApi.unbanUser(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] })
+      setActionError(null)
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const filteredUsers = users.filter(
@@ -82,6 +95,7 @@ export function AdminUsersPanel() {
 
   return (
     <div className="space-y-4">
+      {actionError && <p className="text-sm text-destructive">{actionError}</p>}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">User Management</h2>
         <Badge variant="outline" className="gap-1">

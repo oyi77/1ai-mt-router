@@ -1,13 +1,12 @@
 import hashlib
 import hmac
-import json
 import logging
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 import httpx
 
 from app.config import settings
-from app.services.billing_service import TIER_CONFIGS
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +28,13 @@ class NOWPaymentsService:
 
     async def create_payment(
         self,
-        amount_usd: float,
+        amount_cents: int,
         tier: str,
         billing_period: str,
         user_id: int,
     ) -> Optional[Dict[str, Any]]:
         """Create a NOWPayments invoice and return payment_url + payment_id."""
+        amount_usd = float(Decimal(amount_cents) / Decimal(100))
         payload = {
             "price_amount": amount_usd,
             "price_currency": "usd",
@@ -42,8 +42,8 @@ class NOWPaymentsService:
             "order_id": f"{user_id}_{tier}_{billing_period}",
             "order_description": f"MT5 Router {tier.capitalize()} - {billing_period}",
             "ipn_callback_url": f"{settings.BASE_URL}/api/v1/billing/nowpayments/webhook",
-            "success_url": "https://mt-oc.aitradepulse.com/billing/success",
-            "cancel_url": "https://mt-oc.aitradepulse.com/billing/cancel",
+            "success_url": f"{settings.BASE_URL}/billing/success",
+            "cancel_url": f"{settings.BASE_URL}/billing/cancel",
         }
 
         try:
@@ -64,15 +64,14 @@ class NOWPaymentsService:
             logger.error(f"NOWPayments create_payment failed: {e}")
             return None
 
-    def verify_webhook(self, payload: dict, signature: str) -> bool:
+    def verify_webhook(self, payload: bytes, signature: str) -> bool:
         """Verify IPN webhook signature using HMAC-SHA512."""
         if not signature or not self.ipn_secret:
             return False
 
-        sorted_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         computed = hmac.new(
             self.ipn_secret.encode("utf-8"),
-            sorted_payload.encode("utf-8"),
+            payload,
             hashlib.sha512,
         ).hexdigest()
 

@@ -1,7 +1,9 @@
 import socket
 import logging
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+from app.core.docker_client import get_docker_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,7 @@ class MT5Service:
             return self._container_port
 
         try:
-            import docker
-
-            client = docker.from_env()
+            client = get_docker_client()
             container = client.containers.get(self.instance_id)
             ports = container.ports.get("18812/tcp")
             if ports:
@@ -65,6 +65,15 @@ class MT5Service:
             return True
         except (socket.timeout, ConnectionRefusedError, OSError):
             return False
+
+    def check_server(self, timeout: int = 5) -> bool:
+        """Public reachability probe for this instance's MT5 gateway.
+
+        Bundle B12 (C18): callers such as account status checks probe the
+        server before connecting; keep the socket check behind a public API
+        instead of reaching into the private ``_check_server``.
+        """
+        return self._check_server(timeout=timeout)
 
     def _connect(self):
         if self._mt5 is None:
@@ -139,7 +148,7 @@ class MT5Service:
         try:
             account = self._mt5.account_info()
             return account is not None
-        except:
+        except Exception:
             return False
 
     def get_account_info(self) -> Optional[Dict[str, Any]]:
@@ -189,7 +198,7 @@ class MT5Service:
                     "swap": float(pos.swap),
                     "commission": float(pos.commission),
                     "comment": pos.comment,
-                    "time": datetime.fromtimestamp(pos.time).isoformat(),
+                    "time": datetime.fromtimestamp(pos.time, tz=timezone.utc).isoformat(),
                 }
                 for pos in positions
             ]
@@ -229,6 +238,9 @@ class MT5Service:
                 "SELL_STOP_LIMIT": mt5.ORDER_TYPE_SELL_STOP_LIMIT,
             }
 
+            if order_type.upper() not in type_map:
+                raise ValueError(f"Invalid order type: {order_type}")
+
             is_pending = order_type.upper() in [
                 "BUY_LIMIT",
                 "SELL_LIMIT",
@@ -244,7 +256,7 @@ class MT5Service:
                 "action": action,
                 "symbol": symbol,
                 "volume": float(volume),
-                "type": type_map.get(order_type.upper(), mt5.ORDER_TYPE_BUY),
+                "type": type_map[order_type.upper()],
                 "price": float(price),
                 "deviation": 20,
                 "magic": magic,
@@ -364,7 +376,7 @@ class MT5Service:
                     "tp": float(order.tp) if order.tp else None,
                     "magic": order.magic,
                     "comment": order.comment,
-                    "time_setup": datetime.fromtimestamp(order.time_setup).isoformat(),
+                    "time_setup": datetime.fromtimestamp(order.time_setup, tz=timezone.utc).isoformat(),
                 }
                 for order in orders
             ]
@@ -421,7 +433,7 @@ class MT5Service:
                     "profit": float(deal.profit),
                     "commission": float(deal.commission),
                     "swap": float(deal.swap),
-                    "time": datetime.fromtimestamp(deal.time).isoformat(),
+                    "time": datetime.fromtimestamp(deal.time, tz=timezone.utc).isoformat(),
                     "comment": deal.comment,
                 }
                 for deal in deals
@@ -431,7 +443,12 @@ class MT5Service:
             return []
 
     def modify_position(
-        self, ticket: int, sl: Optional[float] = None, tp: Optional[float] = None
+        self,
+        ticket: int,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        sl_clear: bool = False,
+        tp_clear: bool = False,
     ) -> bool:
         try:
             mt5 = self._connect()
@@ -440,9 +457,13 @@ class MT5Service:
                 "position": ticket,
                 "comment": "mt5-router-modify",
             }
-            if sl is not None:
+            if sl_clear:
+                request["sl"] = 0.0
+            elif sl is not None:
                 request["sl"] = float(sl)
-            if tp is not None:
+            if tp_clear:
+                request["tp"] = 0.0
+            elif tp is not None:
                 request["tp"] = float(tp)
             result = mt5.order_send(request)
             return result and result.retcode == mt5.TRADE_RETCODE_DONE
@@ -517,6 +538,8 @@ class MT5Service:
         price: Optional[float] = None,
         sl: Optional[float] = None,
         tp: Optional[float] = None,
+        sl_clear: bool = False,
+        tp_clear: bool = False,
     ) -> bool:
         try:
             mt5 = self._connect()
@@ -534,9 +557,13 @@ class MT5Service:
                 "price": float(price) if price is not None else float(order.price_open),
                 "comment": "mt5-router-modify-order",
             }
-            if sl is not None:
+            if sl_clear:
+                request["sl"] = 0.0
+            elif sl is not None:
                 request["sl"] = float(sl)
-            if tp is not None:
+            if tp_clear:
+                request["tp"] = 0.0
+            elif tp is not None:
                 request["tp"] = float(tp)
 
             result = mt5.order_send(request)
@@ -556,7 +583,7 @@ class MT5Service:
                     "ask": float(tick.ask),
                     "last": float(tick.last),
                     "volume": int(tick.volume),
-                    "time": datetime.fromtimestamp(tick.time).isoformat(),
+                    "time": datetime.fromtimestamp(tick.time, tz=timezone.utc).isoformat(),
                     "flags": tick.flags,
                 }
             return None
@@ -585,7 +612,7 @@ class MT5Service:
 
             return [
                 {
-                    "time": datetime.fromtimestamp(int(rate["time"])).isoformat(),
+                    "time": datetime.fromtimestamp(int(rate["time"]), tz=timezone.utc).isoformat(),
                     "open": float(rate["open"]),
                     "high": float(rate["high"]),
                     "low": float(rate["low"]),
@@ -622,7 +649,7 @@ class MT5Service:
 
             return {
                 "symbol": symbol,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "bids": bids,
                 "asks": asks,
             }

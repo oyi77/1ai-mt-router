@@ -1,11 +1,20 @@
-import stripe
+import copy
+import json
 import logging
-from typing import Optional, Dict, Any, List
+import os
 from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+import stripe
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.core.audit import write_audit_log
+from app.models.database import Invoice, Subscription
 
 logger = logging.getLogger(__name__)
 
-TIER_CONFIGS = {
+_DEFAULT_TIER_CONFIGS = {
     "free": {
         "name": "Free",
         "price_monthly": 0,
@@ -28,8 +37,6 @@ TIER_CONFIGS = {
         "name": "Basic",
         "price_monthly": 2900,
         "price_yearly": 29000,
-        "stripe_price_monthly": "price_basic_monthly",
-        "stripe_price_yearly": "price_basic_yearly",
         "limits": {
             "max_servers": 3,
             "max_instances": 5,
@@ -49,8 +56,6 @@ TIER_CONFIGS = {
         "name": "Pro",
         "price_monthly": 7900,
         "price_yearly": 79000,
-        "stripe_price_monthly": "price_pro_monthly",
-        "stripe_price_yearly": "price_pro_yearly",
         "limits": {
             "max_servers": 10,
             "max_instances": 25,
@@ -89,6 +94,35 @@ TIER_CONFIGS = {
     },
 }
 
+_TIERS_FILE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data",
+    "tiers.json",
+)
+
+
+def _load_tier_configs() -> Dict[str, Any]:
+    """Load tier configs from data/tiers.json, falling back to defaults.
+
+    tiers.json is the single source of truth for tier pricing and limits
+    (M12); if it is missing or corrupt we log a warning and use the embedded
+    defaults so the router still boots.
+    """
+    try:
+        with open(_TIERS_FILE_PATH, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "basic" not in data:
+            raise ValueError("tiers.json missing required 'basic' tier")
+        return data
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        logger.warning(
+            f"Failed to load tiers.json ({e}); using default tier configs"
+        )
+        return copy.deepcopy(_DEFAULT_TIER_CONFIGS)
+
+
+TIER_CONFIGS = _load_tier_configs()
+
 
 class BillingService:
     def __init__(self, stripe_secret_key: str, webhook_secret: str):
@@ -116,6 +150,9 @@ class BillingService:
         success_url: str,
         cancel_url: str,
         trial_days: int = 14,
+        tier: str = None,
+        billing_period: str = None,
+        user_id: int = None,
     ) -> Optional[Dict]:
         try:
             session = stripe.checkout.Session.create(
@@ -125,8 +162,14 @@ class BillingService:
                 mode="subscription",
                 success_url=success_url,
                 cancel_url=cancel_url,
-                trial_period_days=trial_days,
-                subscription_data={"trial_period_days": trial_days},
+                subscription_data={
+                    "trial_period_days": trial_days,
+                    "metadata": {
+                        "user_id": str(user_id),
+                        "tier": tier,
+                        "billing_period": billing_period,
+                    },
+                },
             )
             return {"session_id": session.id, "url": session.url}
         except Exception as e:
@@ -225,7 +268,9 @@ class BillingService:
             logger.error(f"Failed to record usage: {e}")
             return False
 
-    def handle_webhook(self, payload: bytes, sig_header: str) -> Dict[str, Any]:
+    def handle_webhook(
+        self, payload: bytes, sig_header: str, db: Session
+    ) -> Dict[str, Any]:
         try:
             event = stripe.Webhook.construct_event(
                 payload, sig_header, self.webhook_secret
@@ -242,39 +287,289 @@ class BillingService:
 
             handler = handler_map.get(event["type"])
             if handler:
-                return handler(event["data"]["object"])
+                return handler(db, event["data"]["object"])
 
             return {"status": "unhandled", "type": event["type"]}
 
         except stripe.error.SignatureVerificationError:
             return {"status": "error", "message": "Invalid signature"}
-        except Exception as e:
-            logger.error(f"Webhook error: {e}")
-            return {"status": "error", "message": str(e)}
+        except Exception:
+            logger.error("Webhook error", exc_info=True)
+            return {"status": "error", "message": "Webhook processing failed"}
 
-    def _handle_checkout_completed(self, session: Dict) -> Dict:
-        logger.info(f"Checkout completed: {session.get('id')}")
+    def _handle_checkout_completed(
+        self, db: Session, session: Dict
+    ) -> Dict:
+        user_id = None
+        metadata = session.get("metadata") or {}
+        if metadata.get("user_id"):
+            try:
+                user_id = int(metadata["user_id"])
+            except (TypeError, ValueError):
+                user_id = None
+
+        if user_id is None:
+            user_id = self._resolve_user_id(db, session.get("customer"))
+
+        if user_id is None:
+            sub = (
+                db.query(Subscription)
+                .filter(
+                    Subscription.stripe_subscription_id == session.get("subscription")
+                )
+                .first()
+            )
+            user_id = sub.user_id if sub else None
+
+        if user_id is None:
+            logger.error(
+                f"Checkout {session.get('id')}: no user for checkout, skipping"
+            )
+            return {"status": "error", "message": "No user for checkout"}
+
+        tier = metadata.get("tier") or "free"
+        self._upsert_subscription(
+            db,
+            {
+                "id": session.get("subscription"),
+                "customer": session.get("customer"),
+                "status": "active",
+            },
+            user_id=user_id,
+            tier=tier,
+        )
+
+        if session.get("invoice"):
+            self._upsert_invoice(db, user_id, {"id": session.get("invoice")})
+
+        write_audit_log(
+            db,
+            action="stripe.checkout.completed",
+            user_id=user_id,
+            resource_type="checkout",
+            resource_id=session.get("id"),
+            details={
+                "tier": tier,
+                "billing_period": metadata.get("billing_period"),
+            },
+        )
         return {"status": "processed", "type": "checkout.completed"}
 
-    def _handle_subscription_created(self, subscription: Dict) -> Dict:
-        logger.info(f"Subscription created: {subscription.get('id')}")
+    def _handle_subscription_created(
+        self, db: Session, subscription: Dict
+    ) -> Dict:
+        sub = self._upsert_subscription(db, subscription)
+        write_audit_log(
+            db,
+            action="stripe.subscription.created",
+            user_id=sub.user_id if sub else None,
+            resource_type="subscription",
+            resource_id=subscription.get("id"),
+        )
         return {"status": "processed", "type": "subscription.created"}
 
-    def _handle_subscription_updated(self, subscription: Dict) -> Dict:
-        logger.info(f"Subscription updated: {subscription.get('id')}")
+    def _handle_subscription_updated(
+        self, db: Session, subscription: Dict
+    ) -> Dict:
+        sub = self._upsert_subscription(db, subscription)
+        write_audit_log(
+            db,
+            action="stripe.subscription.updated",
+            user_id=sub.user_id if sub else None,
+            resource_type="subscription",
+            resource_id=subscription.get("id"),
+        )
         return {"status": "processed", "type": "subscription.updated"}
 
-    def _handle_subscription_deleted(self, subscription: Dict) -> Dict:
-        logger.info(f"Subscription deleted: {subscription.get('id')}")
+    def _handle_subscription_deleted(
+        self, db: Session, subscription: Dict
+    ) -> Dict:
+        sub = (
+            db.query(Subscription)
+            .filter(Subscription.stripe_subscription_id == subscription.get("id"))
+            .first()
+        )
+        if sub:
+            sub.status = "canceled"
+            sub.cancel_at_period_end = True
+            db.commit()
+        write_audit_log(
+            db,
+            action="stripe.subscription.deleted",
+            user_id=sub.user_id if sub else None,
+            resource_type="subscription",
+            resource_id=subscription.get("id"),
+        )
         return {"status": "processed", "type": "subscription.deleted"}
 
-    def _handle_invoice_paid(self, invoice: Dict) -> Dict:
-        logger.info(f"Invoice paid: {invoice.get('id')}")
+    def _handle_invoice_paid(self, db: Session, invoice: Dict) -> Dict:
+        user_id = self._resolve_user_id(db, invoice.get("customer"))
+        if user_id is None:
+            logger.warning(
+                f"Invoice {invoice.get('id')}: no user for customer, skipping"
+            )
+            return {"status": "processed", "type": "invoice.paid"}
+        self._upsert_invoice(db, user_id, invoice)
+        write_audit_log(
+            db,
+            action="stripe.invoice.paid",
+            user_id=user_id,
+            resource_type="invoice",
+            resource_id=invoice.get("id"),
+            details={"amount_cents": invoice.get("amount_paid")},
+        )
         return {"status": "processed", "type": "invoice.paid"}
 
-    def _handle_invoice_failed(self, invoice: Dict) -> Dict:
-        logger.warning(f"Invoice failed: {invoice.get('id')}")
+    def _handle_invoice_failed(self, db: Session, invoice: Dict) -> Dict:
+        user_id = self._resolve_user_id(db, invoice.get("customer"))
+        if user_id is None:
+            logger.warning(
+                f"Invoice {invoice.get('id')}: no user for customer, skipping"
+            )
+            return {"status": "processed", "type": "invoice.payment_failed"}
+        self._upsert_invoice(db, user_id, invoice)
+        write_audit_log(
+            db,
+            action="stripe.invoice.payment_failed",
+            user_id=user_id,
+            resource_type="invoice",
+            resource_id=invoice.get("id"),
+        )
         return {"status": "processed", "type": "invoice.payment_failed"}
+
+    def _resolve_tier_from_price(self, price_id: str) -> Optional[str]:
+        """Map a configured Stripe price id back to its tier name."""
+        if not price_id:
+            return None
+        for name, config in TIER_CONFIGS.items():
+            for period in ("monthly", "yearly"):
+                configured = getattr(
+                    settings, f"STRIPE_PRICE_{name.upper()}_{period.upper()}", ""
+                )
+                if configured and configured == price_id:
+                    return name
+        return None
+
+    def _resolve_user_id(self, db: Session, customer_id: str) -> Optional[int]:
+        """Find the internal user id for a Stripe customer, if known."""
+        if not customer_id:
+            return None
+        sub = (
+            db.query(Subscription)
+            .filter(Subscription.stripe_customer_id == customer_id)
+            .first()
+        )
+        return sub.user_id if sub else None
+
+    def _upsert_invoice(
+        self, db: Session, user_id: int, invoice: Dict
+    ) -> Optional[Invoice]:
+        """Create or update an Invoice row from a Stripe invoice object."""
+        inv_id = invoice.get("id")
+        if not inv_id:
+            return None
+
+        amount = invoice.get("amount_paid") or invoice.get("amount_due") or 0
+
+        def _ts(value):
+            if isinstance(value, (int, float)):
+                return datetime.utcfromtimestamp(value)
+            return None
+
+        inv = (
+            db.query(Invoice)
+            .filter(Invoice.stripe_invoice_id == inv_id)
+            .first()
+        )
+        if not inv:
+            inv = Invoice(
+                user_id=user_id,
+                stripe_invoice_id=inv_id,
+                amount_cents=amount,
+                currency=invoice.get("currency") or "usd",
+                status=invoice.get("status") or "pending",
+                invoice_url=invoice.get("hosted_invoice_url"),
+                pdf_url=invoice.get("invoice_pdf"),
+                period_start=_ts(invoice.get("period_start")),
+                period_end=_ts(invoice.get("period_end")),
+            )
+            db.add(inv)
+        else:
+            inv.user_id = user_id
+            inv.amount_cents = amount
+            inv.status = invoice.get("status") or inv.status
+            inv.invoice_url = invoice.get("hosted_invoice_url") or inv.invoice_url
+            inv.pdf_url = invoice.get("invoice_pdf") or inv.invoice_pdf
+
+        db.commit()
+        return inv
+
+    def _upsert_subscription(
+        self,
+        db: Session,
+        subscription: Dict,
+        user_id: int = None,
+        tier: str = None,
+    ) -> Optional[Subscription]:
+        """Create or update a Subscription row from a Stripe object."""
+        sub_id = subscription.get("id")
+        customer_id = subscription.get("customer")
+        if user_id is None:
+            user_id = self._resolve_user_id(db, customer_id)
+        if not sub_id or user_id is None:
+            logger.warning(
+                f"Subscription {sub_id}: missing id or no user, skipping upsert"
+            )
+            return None
+
+        sub = (
+            db.query(Subscription)
+            .filter(Subscription.stripe_subscription_id == sub_id)
+            .first()
+        )
+
+        if tier is None:
+            items = subscription.get("items") or []
+            price_id = items[0].get("price", {}).get("id") if items else None
+            tier = self._resolve_tier_from_price(price_id)
+        if tier is None:
+            tier = "free"
+
+        def _ts(value):
+            if isinstance(value, (int, float)):
+                return datetime.utcfromtimestamp(value)
+            return None
+
+        period_start = _ts(subscription.get("current_period_start"))
+        period_end = _ts(subscription.get("current_period_end"))
+
+        if not sub:
+            sub = Subscription(
+                user_id=user_id,
+                stripe_subscription_id=sub_id,
+                stripe_customer_id=customer_id,
+                tier=tier,
+                status=subscription.get("status") or "active",
+                current_period_start=period_start,
+                current_period_end=period_end,
+            )
+            db.add(sub)
+        else:
+            sub.user_id = user_id
+            sub.stripe_customer_id = customer_id or sub.stripe_customer_id
+            sub.tier = tier
+            sub.status = subscription.get("status") or sub.status
+            sub.current_period_start = period_start or sub.current_period_start
+            sub.current_period_end = period_end or sub.current_period_end
+            if "cancel_at_period_end" in subscription:
+                sub.cancel_at_period_end = bool(
+                    subscription["cancel_at_period_end"]
+                )
+            else:
+                sub.cancel_at_period_end = False
+
+        db.commit()
+        return sub
 
     def check_usage_limits(
         self, user_id: int, tier: str, current_usage: Dict[str, int]

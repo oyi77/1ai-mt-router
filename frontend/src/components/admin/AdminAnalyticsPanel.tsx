@@ -3,6 +3,7 @@ import { adminApi } from "@/api/admin"
 import { MetricsCard } from "@/components/dashboard/MetricsCard"
 import { Card, CardHeader, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { formatCents } from "@/lib/utils"
 import {
   Users,
   UserCheck,
@@ -84,7 +85,7 @@ export function AdminAnalyticsPanel() {
         />
         <MetricsCard
           title="Total Revenue"
-          value={`$${analytics.total_revenue.toLocaleString()}`}
+          value={formatCents(analytics.total_revenue)}
           icon={DollarSign}
           variant="success"
         />

@@ -3,7 +3,7 @@ import { Link } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import type { Tier } from "@/api/billing"
+import { formatCents, type Tier } from "@/api/billing"
 import {
   Server,
   Activity,
@@ -369,9 +369,11 @@ export function Landing() {
                   billingPeriod === "monthly"
                     ? tier.price_monthly
                     : tier.price_yearly
+                const safePrice =
+                  typeof price === "number" && Number.isFinite(price) ? price : 0
                 const monthlyEquivalent =
-                  billingPeriod === "yearly"
-                    ? Math.round((tier.price_yearly / 12) * 100) / 100
+                  billingPeriod === "yearly" && Number.isFinite(tier.price_yearly)
+                    ? Math.round(tier.price_yearly / 12)
                     : null
 
                 return (
@@ -392,14 +394,14 @@ export function Landing() {
                       </CardTitle>
                       <div className="mt-2">
                         <span className="text-4xl font-bold">
-                          ${price === 0 ? "0" : price.toFixed(0)}
+                          {safePrice === 0 ? "$0" : formatCents(safePrice)}
                         </span>
                         <span className="text-muted-foreground">
                           /{billingPeriod === "monthly" ? "mo" : "yr"}
                         </span>
-                        {monthlyEquivalent !== null && price > 0 && (
+                        {monthlyEquivalent !== null && safePrice > 0 && (
                           <p className="mt-1 text-sm text-muted-foreground">
-                            ${monthlyEquivalent.toFixed(0)}/mo billed yearly
+                            {formatCents(monthlyEquivalent)}/mo billed yearly
                           </p>
                         )}
                       </div>
@@ -457,7 +459,7 @@ export function Landing() {
                           className="w-full"
                           variant={isPopular ? "default" : "outline"}
                         >
-                          {price === 0 ? "Start Free" : "Get Started"}
+                          {safePrice === 0 ? "Start Free" : "Get Started"}
                         </Button>
                       </Link>
                     </CardContent>

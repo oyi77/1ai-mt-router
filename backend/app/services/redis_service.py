@@ -2,7 +2,6 @@ import redis.asyncio as redis
 from app.config import settings
 import json
 from typing import Optional, Any
-from datetime import timedelta
 
 redis_client: Optional[redis.Redis] = None
 
@@ -10,10 +9,10 @@ redis_client: Optional[redis.Redis] = None
 async def init_redis():
     global redis_client
     redis_client = redis.Redis(
-        host=settings.redis_host,
-        port=settings.redis_port,
-        db=settings.redis_db,
-        password=settings.redis_password,
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        db=settings.REDIS_DB,
+        password=settings.REDIS_PASSWORD or None,
         decode_responses=True,
     )
     return redis_client

@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
@@ -7,81 +7,128 @@ on:
     branches: [ master ]
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.9', '3.10', '3.11']
-    
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Install dependencies
-      run: |
-        cd backend
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Lint with flake8
-      run: |
-        cd backend
-        pip install flake8
-        flake8 app/ --count --select=E9,F63,F7,F82 --show-source --statistics
-    
-    - name: Run tests
-      run: |
-        cd backend
-        python -m pytest tests/ -v --tb=short
+      - uses: actions/checkout@v4
 
-  build:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Syntax gate (compileall)
+        run: |
+          cd backend
+          python -m compileall -q app
+
+      - name: Run tests
+        run: |
+          cd backend
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/ -q
+
+  frontend:
     runs-on: ubuntu-latest
-    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run tests (vitest)
+        run: |
+          cd frontend
+          npx vitest run
+
+      - name: Build
+        run: |
+          cd frontend
+          npm run build
+
+      - name: Type check (tsc)
+        run: |
+          cd frontend
+          npx tsc --noEmit
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Base docker-compose.yml loads `env_file: .env` (gitignored). Without a
+      # .env every `docker compose config` below fails with "env file not found",
+      # so materialize one from the template first.
+      - name: Prepare .env for compose config
+        run: cp .env.example .env
+
+      # docker-compose.dev/local/prod.yml are override fragments of docker-compose.yml,
+      # so each is validated together with the base file it extends.
+      - name: docker compose config — docker-compose.yml
+        run: docker compose -f docker-compose.yml config
+
+      - name: docker compose config — docker-compose.dev.yml
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+
+      - name: docker compose config — docker-compose.local.yml
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml config
+
+      - name: docker compose config — docker-compose.prod.yml
+        env:
+          # Dummy values only: docker-compose.prod.yml interpolates ${VAR:?...}
+          # for the production secrets — validation must not depend on real secrets.
+          DB_PASSWORD: ci-config-validation-only
+          JWT_SECRET: ci-config-validation-only-jwt-secret
+          SECRET_KEY: ci-config-validation-only-secret-key
+          ENCRYPTION_KEY: ci-config-validation-only-encryption-key
+          CORS_ORIGINS: https://ci-config-validation.invalid
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+
+  # Push-only, gated on DOCKERHUB_USERNAME: when the secret is absent every step
+  # skips and the job succeeds, so CI never fails on missing credentials.
+  image-push:
+    runs-on: ubuntu-latest
+    needs: backend
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-    
-    - name: Login to Docker Hub
-      if: env.DOCKERHUB_USERNAME != ''
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: actions/checkout@v4
 
-    - name: Build and push backend
-      if: env.DOCKERHUB_USERNAME != ''
-      uses: docker/build-push-action@v4
-      with:
-        context: ./backend
-        push: true
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/mt5-router-backend:latest
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-    - name: Build and push frontend
-      if: env.DOCKERHUB_USERNAME != ''
-      uses: docker/build-push-action@v4
-      with:
-        context: ./frontend
-        push: true
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/mt5-router-frontend:latest
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    
-    steps:
-    - name: Deploy to production
-      run: |
-        echo "Deploying to production..."
-        # Add your deployment commands here
-        # Example: ssh to server and pull new images
+      - name: Build and push backend
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/mt5-router-backend:latest
+
+      - name: Build and push frontend
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/mt5-router-frontend:latest

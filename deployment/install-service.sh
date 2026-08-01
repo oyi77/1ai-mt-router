@@ -13,6 +13,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+if [ ! -f "$SCRIPT_DIR/../.env" ]; then
+    echo "ERROR: .env not found at $SCRIPT_DIR/../.env"
+    echo "Run './setup.sh prod' (or local/dev) first to generate it, then re-run this installer."
+    exit 1
+fi
+
 cp "$SERVICE_FILE" "$TARGET"
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"

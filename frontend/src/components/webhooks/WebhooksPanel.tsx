@@ -19,6 +19,51 @@ const EVENT_OPTIONS = [
   { value: 'account.balance', label: 'Balance Change' },
 ]
 
+// Client-side mirror of the backend SSRF guard (backend/app/services/notification_service.py).
+// DNS resolution is done server-side only; here we can only reject literal hosts/IPs.
+function validateWebhookUrl(url: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return 'Enter a valid URL'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'Only http/https webhook URLs are allowed'
+  }
+  const host = parsed.hostname.toLowerCase()
+  if (!host) return 'Webhook URL must include a host'
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
+    return 'Webhook URL host is not allowed'
+  }
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (ipv4) {
+    const parts = ipv4.slice(1).map(Number)
+    if (parts.some((p) => p > 255)) return 'Webhook URL host is not allowed'
+    const [a, b] = parts
+    if (
+      a === 127 || a === 0 || a === 10 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254)
+    ) {
+      return 'Webhook URL host is not allowed'
+    }
+    return null
+  }
+  if (host.includes(':')) {
+    const h = host.replace(/^\[|\]$/g, '')
+    if (
+      h === '::1' || h === '::' || h === '0:0:0:0:0:0:0:1' ||
+      h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')
+    ) {
+      return 'Webhook URL host is not allowed'
+    }
+    return null
+  }
+  return null
+}
+
 export function WebhooksPanel() {
   const queryClient = useQueryClient()
   const { fetchWebhooks, createWebhook, deleteWebhook, testWebhook } = useWebhooks()
@@ -31,6 +76,7 @@ export function WebhooksPanel() {
   })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [testingId, setTestingId] = useState<number | null>(null)
+  const [urlError, setUrlError] = useState<string | null>(null)
 
   const { data: webhooks = [], isLoading, refetch } = useQuery({
     queryKey: ['webhooks'],
@@ -38,6 +84,11 @@ export function WebhooksPanel() {
   })
 
   const handleSubmit = async () => {
+    const error = validateWebhookUrl(formData.url)
+    if (error) {
+      setUrlError(error)
+      return
+    }
     setIsSubmitting(true)
     try {
       await createWebhook(formData)
@@ -198,8 +249,12 @@ export function WebhooksPanel() {
                 id="url"
                 placeholder="https://example.com/webhook"
                 value={formData.url}
-                onChange={(e) => setFormData(prev => ({ ...prev, url: e.target.value }))}
+                onChange={(e) => {
+                  setFormData(prev => ({ ...prev, url: e.target.value }))
+                  setUrlError(null)
+                }}
               />
+              {urlError && <p className="text-sm text-destructive mt-1">{urlError}</p>}
             </div>
             <div>
               <Label htmlFor="secret">Secret (optional)</Label>

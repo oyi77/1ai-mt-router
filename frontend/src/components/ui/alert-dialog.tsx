@@ -1,3 +1,4 @@
+import * as React from "react"
 import { cn } from "@/lib/utils"
 import { AlertTriangle } from "lucide-react"
 import { Button } from "./button"
@@ -10,7 +11,7 @@ interface AlertDialogProps {
   confirmLabel?: string
   cancelLabel?: string
   variant?: "destructive" | "default"
-  onConfirm: () => void
+  onConfirm: () => unknown
   isLoading?: boolean
 }
 
@@ -25,6 +26,15 @@ export function AlertDialog({
   onConfirm,
   isLoading = false,
 }: AlertDialogProps) {
+  React.useEffect(() => {
+    if (!open || isLoading) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onOpenChange(false)
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [open, isLoading, onOpenChange])
+
   if (!open) return null
 
   return (
@@ -34,6 +44,9 @@ export function AlertDialog({
     >
       <div className="fixed inset-0 bg-black/50" />
       <div
+        role="alertdialog"
+        aria-modal="true"
+        tabIndex={-1}
         className="relative z-50 bg-background rounded-lg border p-6 shadow-lg w-full max-w-md mx-4"
         onClick={(e) => e.stopPropagation()}
       >
@@ -58,9 +71,13 @@ export function AlertDialog({
           </Button>
           <Button
             variant={variant === "destructive" ? "destructive" : "default"}
-            onClick={() => {
-              onConfirm()
-              onOpenChange(false)
+            onClick={async () => {
+              try {
+                await onConfirm()
+                onOpenChange(false)
+              } catch {
+                // Keep the dialog open so the user can retry.
+              }
             }}
             disabled={isLoading}
           >

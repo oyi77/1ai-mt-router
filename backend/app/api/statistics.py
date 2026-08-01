@@ -2,16 +2,34 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime
+import asyncio
 import logging
 
 from app.core.database import get_db
-from app.models.database import MT5Account
+from app.core.exceptions import NotFoundError, ServiceUnavailableError
+from app.core.http import SafeJSONResponse
+from app.models.database import Instance, User
 from app.auth.jwt import get_current_user
 from app.services.mt5_service import MT5Service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Timeout for MT5 bridge calls so unreachable terminals fail fast.
+_MT5_TIMEOUT = 30
+
+
+def _require_owned_instance(instance_id: str, user: User, db: Session) -> Instance:
+    """Return the Instance owned by ``user``, or 404 (no existence leak)."""
+    instance = (
+        db.query(Instance)
+        .filter(Instance.id == instance_id, Instance.user_id == user.id)
+        .first()
+    )
+    if not instance:
+        raise NotFoundError("Instance not found")
+    return instance
 
 
 class TradeStatistics(BaseModel):
@@ -54,16 +72,21 @@ class EquityPoint(BaseModel):
     balance: float
 
 
-@router.get("/summary", response_model=TradeStatistics)
+@router.get("/summary", response_model=TradeStatistics, response_class=SafeJSONResponse)
 async def get_statistics(
     instance_id: str = Query(...),
     days: int = Query(30, ge=1, le=365),
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    _require_owned_instance(instance_id, user, db)
     try:
         mt5 = MT5Service(instance_id)
 
-        deals = mt5.get_deals_history(days=days)
+        deals = await asyncio.wait_for(
+            asyncio.to_thread(mt5.get_history_deals, days=days),
+            timeout=_MT5_TIMEOUT,
+        )
         if not deals:
             return TradeStatistics(
                 total_trades=0,
@@ -134,20 +157,27 @@ async def get_statistics(
             sharpe_ratio=None,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting statistics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ServiceUnavailableError("Failed to fetch statistics")
 
 
-@router.get("/daily", response_model=List[DailySummary])
+@router.get("/daily", response_model=List[DailySummary], response_class=SafeJSONResponse)
 async def get_daily_summary(
     instance_id: str = Query(...),
     days: int = Query(30, ge=1, le=365),
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    _require_owned_instance(instance_id, user, db)
     try:
         mt5 = MT5Service(instance_id)
-        deals = mt5.get_deals_history(days=days)
+        deals = await asyncio.wait_for(
+            asyncio.to_thread(mt5.get_history_deals, days=days),
+            timeout=_MT5_TIMEOUT,
+        )
 
         daily = {}
         for deal in deals:
@@ -175,20 +205,27 @@ async def get_daily_summary(
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting daily summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ServiceUnavailableError("Failed to fetch statistics")
 
 
-@router.get("/symbols", response_model=List[SymbolStats])
+@router.get("/symbols", response_model=List[SymbolStats], response_class=SafeJSONResponse)
 async def get_symbol_stats(
     instance_id: str = Query(...),
     days: int = Query(30, ge=1, le=365),
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    _require_owned_instance(instance_id, user, db)
     try:
         mt5 = MT5Service(instance_id)
-        deals = mt5.get_deals_history(days=days)
+        deals = await asyncio.wait_for(
+            asyncio.to_thread(mt5.get_history_deals, days=days),
+            timeout=_MT5_TIMEOUT,
+        )
 
         symbol_data = {}
         for deal in deals:
@@ -218,24 +255,33 @@ async def get_symbol_stats(
 
         return sorted(result, key=lambda x: abs(x.net_profit), reverse=True)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting symbol stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ServiceUnavailableError("Failed to fetch statistics")
 
 
-@router.get("/equity-curve", response_model=List[EquityPoint])
+@router.get("/equity-curve", response_model=List[EquityPoint], response_class=SafeJSONResponse)
 async def get_equity_curve(
     instance_id: str = Query(...),
     days: int = Query(30, ge=1, le=365),
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    _require_owned_instance(instance_id, user, db)
     try:
         mt5 = MT5Service(instance_id)
 
-        account_info = mt5.get_account_info()
+        account_info = await asyncio.wait_for(
+            asyncio.to_thread(mt5.get_account_info), timeout=_MT5_TIMEOUT
+        )
         current_equity = float(account_info.get("equity", 0)) if account_info else 0
 
-        deals = mt5.get_deals_history(days=days)
+        deals = await asyncio.wait_for(
+            asyncio.to_thread(mt5.get_history_deals, days=days),
+            timeout=_MT5_TIMEOUT,
+        )
 
         sorted_deals = sorted(deals, key=lambda x: x.get("time", ""))
 
@@ -264,6 +310,8 @@ async def get_equity_curve(
 
         return sorted(equity_points, key=lambda x: x.timestamp)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting equity curve: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ServiceUnavailableError("Failed to fetch statistics")

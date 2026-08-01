@@ -1,6 +1,3 @@
-from functools import wraps
-from typing import List
-
 from fastapi import Depends, HTTPException, status
 
 from app.auth.jwt import verify_token

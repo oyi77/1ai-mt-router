@@ -60,7 +60,10 @@ class AuthEnhancementService:
                 <h1 style="color: #6366f1; margin-bottom: 20px;">MT5 Router</h1>
                 <h2>Verify Your Email</h2>
                 <p>Please click the button below to verify your email address:</p>
-                <a href="{verification_url}" style="display: inline-block; background: #6366f1; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 20px 0;">
+                <a href="{verification_url}"
+                   style="display: inline-block; background: #6366f1; color: white;
+                          padding: 12px 24px; text-decoration: none; border-radius: 8px;
+                          margin: 20px 0;">
                     Verify Email
                 </a>
                 <p style="color: #888; font-size: 12px;">This link expires in 24 hours.</p>
@@ -84,7 +87,10 @@ class AuthEnhancementService:
                 <h1 style="color: #6366f1; margin-bottom: 20px;">MT5 Router</h1>
                 <h2>Reset Your Password</h2>
                 <p>Click the button below to reset your password:</p>
-                <a href="{reset_url}" style="display: inline-block; background: #6366f1; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin: 20px 0;">
+                <a href="{reset_url}"
+                   style="display: inline-block; background: #6366f1; color: white;
+                          padding: 12px 24px; text-decoration: none; border-radius: 8px;
+                          margin: 20px 0;">
                     Reset Password
                 </a>
                 <p style="color: #888; font-size: 12px;">This link expires in 1 hour.</p>
@@ -115,10 +121,20 @@ class AuthEnhancementService:
             to_email, "2FA Enabled on MT5 Router", html_content
         )
 
+    @staticmethod
+    def _validate_header_value(value: str, field: str) -> str:
+        if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError(f"Invalid email header value for {field}")
+        return value
+
     async def _send_email(self, to_email: str, subject: str, html_content: str) -> bool:
         if not self.smtp_host or not self.from_email:
             logger.warning("Email not configured - skipping send")
             return False
+
+        self._validate_header_value(to_email, "To")
+        self._validate_header_value(subject, "Subject")
+        self._validate_header_value(self.from_email, "From")
 
         try:
             message = MIMEMultipart("alternative")

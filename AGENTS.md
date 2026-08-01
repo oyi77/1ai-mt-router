@@ -16,9 +16,10 @@ Every task follows this sequence. No exceptions.
 Full details: `~/.1ai/core/PROCESS.md` (auto-injected by hooks)
 
 ## This repo
-[One sentence: what this repo does]
-Stack: unknown
-Domain: [what this repo is responsible for]
+MT5 Router — a multi-tenant SaaS for operating MetaTrader 5 trade routers: MT5 instance
+lifecycle (Docker + VNC), trading API, copy trading, billing, notifications, and statistics.
+Stack: Python 3.11 + FastAPI 0.141 + SQLAlchemy 2 + Alembic (backend); React 18 + TypeScript + Vite 5 + Tailwind 3 (frontend); Docker Compose deployment
+Domain: MT5 trade router / trade-copying SaaS — instances, copytrading, billing, stats, notifications
 
 ## Rules — thin loader, no submodule
 Rules are NOT vendored into this repo. This repo does NOT need a rules submodule.
@@ -54,10 +55,14 @@ Do NOT add the rules repo as a git submodule. Update rules centrally, then run/s
 5. Run GATE.md before commit/PR.
 
 ## Repo-specific conventions
-- [add conventions specific to this repo]
+- One router module per domain in `backend/app/api/` (auth, trading, instances, billing, ...), all mounted in `backend/app/main.py` under `/api/v1/*`
+- SQLAlchemy models + Base live in `backend/app/models/database.py`; engine/session in `backend/app/core/database.py`; business logic in `backend/app/services/`
+- Frontend API layer in `frontend/src/api/` (one module per backend router), shared fetch client in `frontend/src/api/client.ts`
+- Env config via pydantic-settings `Settings` in `backend/app/config.py`; template in `.env.example`
 
 ## Commands
-- Dev:   `npm run dev`
-- Test:  `npm run test`
-- Build: `npm run build`
-- Lint:  `npm run lint`
+- Dev (frontend): `cd frontend && npm run dev` (Vite)
+- Test (frontend): `cd frontend && npm run test` (vitest)
+- Build (frontend): `cd frontend && npm run build` (tsc && vite build)
+- Test (backend): `cd backend && /tmp/b3verify/bin/python -B -m pytest tests/ -q`
+- Lint (backend, CI): `cd backend && flake8 app/ --select=E9,F63,F7,F82`

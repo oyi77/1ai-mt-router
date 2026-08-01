@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { getToken } from '@/api/client'
 
 interface UseWebSocketOptions {
   onMessage?: (data: any) => void
@@ -16,7 +17,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const connect = useCallback(() => {
-    const token = localStorage.getItem('token')
+    const token = getToken()
     const wsUrl = token ? `${url}?token=${token}` : url
     
     wsRef.current = new WebSocket(wsUrl)

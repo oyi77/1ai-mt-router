@@ -15,6 +15,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog"
 import { Edit, Check, DollarSign } from "lucide-react"
+import { formatCents } from "@/lib/utils"
 
 export function AdminTiersPanel() {
   const queryClient = useQueryClient()
@@ -28,6 +29,7 @@ export function AdminTiersPanel() {
     max_users: 0,
     support_level: "",
   })
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const { data: tiers, isLoading } = useQuery({
     queryKey: ["admin-tiers"],
@@ -40,14 +42,17 @@ export function AdminTiersPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-tiers"] })
       setEditTier(null)
+      setSaveError(null)
     },
+    onError: (e: Error) => setSaveError(e.message),
   })
 
   function openEdit(key: string, tier: TierConfig) {
     setEditTier({ ...tier, key })
+    setSaveError(null)
     setEditForm({
-      price_monthly: tier.price_monthly,
-      price_yearly: tier.price_yearly,
+      price_monthly: tier.price_monthly / 100,
+      price_yearly: tier.price_yearly / 100,
       max_servers: tier.limits.max_servers,
       max_instances: tier.limits.max_instances,
       max_api_calls_per_day: tier.limits.max_api_calls_per_day,
@@ -61,8 +66,8 @@ export function AdminTiersPanel() {
     updateTier.mutate({
       name: editTier.key,
       data: {
-        price_monthly: editForm.price_monthly,
-        price_yearly: editForm.price_yearly,
+        price_monthly: Math.round(editForm.price_monthly * 100),
+        price_yearly: Math.round(editForm.price_yearly * 100),
         limits: {
           max_servers: editForm.max_servers,
           max_instances: editForm.max_instances,
@@ -117,11 +122,11 @@ export function AdminTiersPanel() {
             <CardContent className="space-y-4">
               <div>
                 <div className="flex items-baseline gap-1">
-                  <span className="text-3xl font-bold">${tier.price_monthly}</span>
+                  <span className="text-3xl font-bold">{formatCents(tier.price_monthly)}</span>
                   <span className="text-sm text-muted-foreground">/mo</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  ${tier.price_yearly}/yr (save{" "}
+                  {formatCents(tier.price_yearly)}/yr (save{" "}
                   {Math.round((1 - tier.price_yearly / (tier.price_monthly * 12)) * 100)}%)
                 </p>
               </div>
@@ -247,6 +252,7 @@ export function AdminTiersPanel() {
               </div>
             </div>
           </div>
+          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTier(null)}>
               Cancel

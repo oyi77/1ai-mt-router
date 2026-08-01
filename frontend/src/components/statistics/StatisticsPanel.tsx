@@ -4,7 +4,8 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { statisticsApi, TradeStatistics, SymbolStats, EquityPoint, DailySummary } from '@/api/statistics'
 import { useQuery } from '@tanstack/react-query'
-import { TrendingUp, TrendingDown, Target, BarChart3, PieChart, Activity } from 'lucide-react'
+import { TrendingUp, Target, BarChart3, PieChart } from 'lucide-react'
+import { MiniChart } from '@/components/charts/MiniChart'
 
 interface StatisticsPanelProps {
   instanceId: string
@@ -188,14 +189,13 @@ export function StatisticsPanel({ instanceId }: StatisticsPanelProps) {
           {equityLoading ? (
             <p className="text-muted-foreground">Loading...</p>
           ) : (
-            <div className="h-64 flex items-center justify-center border rounded bg-muted/20">
-              <div className="text-center text-muted-foreground">
-                <Activity className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p>Equity chart visualization</p>
-                <p className="text-sm">
-                  {equityCurve?.length || 0} data points
-                </p>
-              </div>
+            <div className="border rounded bg-muted/20 p-2">
+              <MiniChart
+                data={(equityCurve || []).map((p) => ({ time: p.timestamp, value: p.equity }))}
+                label="Equity ($)"
+                color="green"
+                height={240}
+              />
             </div>
           )}
         </CardContent>

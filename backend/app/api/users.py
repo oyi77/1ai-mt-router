@@ -1,52 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
+import hashlib
 import secrets
 from datetime import datetime, timedelta
 
 from app.core.database import get_db
-from app.models.database import User, ApiKey, UserRole
-from app.auth.jwt import get_current_user, create_access_token
+from app.models.database import User, ApiKey
+from app.auth.jwt import get_current_user
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-@router.post("/register")
-async def register(
-    email: str,
-    username: str,
-    password: str,
-    full_name: str = None,
-    db: Session = Depends(get_db),
-):
-    if (
-        db.query(User)
-        .filter((User.email == email) | (User.username == username))
-        .first()
-    ):
-        raise HTTPException(status_code=400, detail="User already exists")
-
-    user = User(
-        email=email,
-        username=username,
-        hashed_password=pwd_context.hash(password),
-        full_name=full_name,
-        role=UserRole.USER,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    token = create_access_token(
-        {"sub": str(user.id), "username": user.username, "role": user.role}
-    )
-    return {"access_token": token, "token_type": "bearer", "user_id": user.id}
 
 
 @router.get("/me")
-async def get_me(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.id == int(user["sub"])).first()
+async def get_me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.id == user.id).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     return {
@@ -63,10 +30,10 @@ async def get_me(user: dict = Depends(get_current_user), db: Session = Depends(g
 async def update_me(
     full_name: str = None,
     email: str = None,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    db_user = db.query(User).filter(User.id == int(user["sub"])).first()
+    db_user = db.query(User).filter(User.id == user.id).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     if full_name:
@@ -82,13 +49,14 @@ async def create_api_key(
     name: str,
     permissions: list = None,
     expires_days: int = 365,
-    user: dict = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    plain_key = f"mtr_{secrets.token_hex(32)}"
     api_key = ApiKey(
-        key=f"mtr_{secrets.token_hex(32)}",
+        key=hashlib.sha256(plain_key.encode("utf-8")).hexdigest(),
         name=name,
-        user_id=int(user["sub"]),
+        user_id=user.id,
         permissions=",".join(permissions) if permissions else "read,trade",
         expires_at=datetime.utcnow() + timedelta(days=expires_days),
     )
@@ -98,7 +66,7 @@ async def create_api_key(
 
     return {
         "id": api_key.id,
-        "key": api_key.key,
+        "key": plain_key,
         "name": api_key.name,
         "expires_at": api_key.expires_at,
     }
@@ -106,9 +74,9 @@ async def create_api_key(
 
 @router.get("/api-keys")
 async def list_api_keys(
-    user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    keys = db.query(ApiKey).filter(ApiKey.user_id == int(user["sub"])).all()
+    keys = db.query(ApiKey).filter(ApiKey.user_id == user.id).all()
     return [
         {
             "id": k.id,
@@ -123,11 +91,11 @@ async def list_api_keys(
 
 @router.delete("/api-keys/{key_id}")
 async def delete_api_key(
-    key_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)
+    key_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
     key = (
         db.query(ApiKey)
-        .filter(ApiKey.id == key_id, ApiKey.user_id == int(user["sub"]))
+        .filter(ApiKey.id == key_id, ApiKey.user_id == user.id)
         .first()
     )
     if not key:

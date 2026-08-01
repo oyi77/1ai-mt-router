@@ -1,14 +1,24 @@
 import paramiko
 import logging
-import json
-import asyncio
 import re
+import shlex
 from typing import Optional, Dict, Any, List
-from datetime import datetime
 from cryptography.fernet import Fernet
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
+
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+
+def _validate_container_name(name: str) -> Optional[str]:
+    """Return an error message if ``name`` is not a valid Docker container name."""
+    if not name or not _CONTAINER_NAME_RE.match(name):
+        return (
+            "Invalid container name: use letters, digits, '.', '_' or '-' "
+            "(start with a letter or digit, max 128 chars)"
+        )
+    return None
 
 
 class SSHService:
@@ -25,6 +35,19 @@ class SSHService:
     def decrypt_secret(self, encrypted: str) -> str:
         return self.cipher.decrypt(encrypted.encode()).decode()
 
+    @staticmethod
+    def _load_private_key(private_key: str) -> paramiko.PKey:
+        """Parse an SSH private key, trying the supported key formats."""
+        data = BytesIO(private_key.encode())
+        for key_type in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
+            try:
+                return key_type.from_private_key(data)
+            except paramiko.SSHException:
+                data.seek(0)
+        raise paramiko.SSHException(
+            "Unable to parse private key (unsupported format)"
+        )
+
     def create_client(
         self,
         host: str,
@@ -39,9 +62,17 @@ class SSHService:
 
         try:
             if private_key:
-                key = paramiko.RSAKey.from_private_key(BytesIO(private_key.encode()))
+                key = self._load_private_key(private_key)
                 client.connect(
-                    host, port=port, username=username, pkey=key, timeout=timeout
+                    host,
+                    port=port,
+                    username=username,
+                    pkey=key,
+                    timeout=timeout,
+                    auth_timeout=timeout,
+                    banner_timeout=timeout,
+                    allow_agent=False,
+                    look_for_keys=False,
                 )
             elif password:
                 client.connect(
@@ -50,14 +81,18 @@ class SSHService:
                     username=username,
                     password=password,
                     timeout=timeout,
+                    auth_timeout=timeout,
+                    banner_timeout=timeout,
+                    allow_agent=False,
+                    look_for_keys=False,
                 )
             else:
                 raise ValueError("Either private_key or password required")
 
-            logger.info(f"SSH connected to {host}:{port}")
+            logger.info("SSH connected to %s:%s", host, port)
             return client
         except Exception as e:
-            logger.error(f"SSH connection failed to {host}: {e}")
+            logger.error("SSH connection failed to %s: %s", host, e)
             return None
 
     def execute_command(
@@ -120,7 +155,7 @@ class SSHService:
             parts = disk_result["output"].split()
             if len(parts) >= 5:
                 disk["total"] = parts[1]
-                disk["used"] = parts[4]
+                disk["used"] = parts[2]
                 disk["percent"] = int(parts[4].replace("%", ""))
 
         docker_result = self.execute_command(
@@ -176,14 +211,18 @@ class SSHService:
         instance_name: str,
         image: str = "lprett/mt5linux:mt5-installed",
     ) -> Dict[str, Any]:
+        name_error = _validate_container_name(instance_name)
+        if name_error:
+            return {"success": False, "error": name_error}
+
         if not self.install_docker(client):
             return {"success": False, "error": "Docker installation failed"}
 
-        self.execute_command(client, f"docker pull {image}", timeout=300)
+        self.execute_command(client, f"docker pull {shlex.quote(image)}", timeout=300)
 
         cmd = (
             f"docker run -d "
-            f"--name {instance_name} "
+            f"--name {shlex.quote(instance_name)} "
             f"--shm-size=2g "
             f"--cap-add=SYS_ADMIN "
             f"--restart unless-stopped "
@@ -191,7 +230,7 @@ class SSHService:
             f"-p 0:6081 "
             f"-l mt5-router.instance=true "
             f"-l mt5-router.created=auto "
-            f"{image}"
+            f"{shlex.quote(image)}"
         )
 
         result = self.execute_command(client, cmd)
@@ -200,10 +239,11 @@ class SSHService:
 
         container_id = result["output"].strip()
 
-        ports_result = self.execute_command(
-            client,
-            f"docker port {instance_name} 18812 | cut -d: -f2 && docker port {instance_name} 6081 | cut -d: -f2",
+        port_cmd = (
+            f"docker port {shlex.quote(instance_name)} 18812 | cut -d: -f2 && "
+            f"docker port {shlex.quote(instance_name)} 6081 | cut -d: -f2"
         )
+        ports_result = self.execute_command(client, port_cmd)
 
         ports = (
             ports_result["output"].strip().split("\n")
@@ -227,9 +267,9 @@ class SSHService:
             return {"success": False, "error": f"Invalid action: {action}"}
 
         cmd = (
-            f"docker {action} {container_name}"
+            f"docker {action} {shlex.quote(container_name)}"
             if action != "rm"
-            else f"docker rm -f {container_name}"
+            else f"docker rm -f {shlex.quote(container_name)}"
         )
         result = self.execute_command(client, cmd, timeout=60)
 
@@ -237,23 +277,25 @@ class SSHService:
             "success": result["success"],
             "action": action,
             "output": result["output"],
+            "error": result["error"],
         }
 
     def get_instance_logs(
         self, client: paramiko.SSHClient, container_name: str, lines: int = 100
     ) -> str:
         result = self.execute_command(
-            client, f"docker logs --tail {lines} {container_name}"
+            client, f"docker logs --tail {lines} {shlex.quote(container_name)}"
         )
         return result["output"] if result["success"] else result["error"]
 
     def get_instance_stats(
         self, client: paramiko.SSHClient, container_name: str
     ) -> Dict[str, Any]:
-        result = self.execute_command(
-            client,
-            f"docker stats {container_name} --no-stream --format '{{{{.CPUPerc}}}}|{{{{.MemUsage}}}}|{{{{.MemPerc}}}}|{{{{.NetIO}}}}|{{{{.BlockIO}}}}'",
+        stats_cmd = (
+            f"docker stats {shlex.quote(container_name)} --no-stream "
+            "--format '{.CPUPerc}|{.MemUsage}|{.MemPerc}|{.NetIO}|{.BlockIO}'"
         )
+        result = self.execute_command(client, stats_cmd)
 
         if not result["success"]:
             return {"error": result["error"]}
@@ -269,10 +311,11 @@ class SSHService:
         }
 
     def list_instances(self, client: paramiko.SSHClient) -> List[Dict[str, Any]]:
-        result = self.execute_command(
-            client,
-            "docker ps -a --filter label=mt5-router.instance --format '{{.ID}}|{{.Names}}|{{.Status}}|{{.Ports}}|{{.CreatedAt}}'",
+        ps_cmd = (
+            "docker ps -a --filter label=mt5-router.instance "
+            "--format '{{.ID}}|{{.Names}}|{{.Status}}|{{.Ports}}|{{.CreatedAt}}'"
         )
+        result = self.execute_command(client, ps_cmd)
 
         instances = []
         if result["success"] and result["output"].strip():
@@ -283,7 +326,7 @@ class SSHService:
                     rpyc_port = None
                     vnc_port = None
 
-                    port_matches = re.findall(r"0\.0\.0\.0:(\d+)->(\d+)/tcp", ports_str)
+                    port_matches = re.findall(r"(?:0\.0\.0\.0|\[::\]):(\d+)->(\d+)/tcp", ports_str)
                     for host_port, container_port in port_matches:
                         if container_port == "18812":
                             rpyc_port = int(host_port)

@@ -1,254 +1,149 @@
-# MT5 Router - SaaS Trading Platform
+# MT5 Router — SaaS Trading Platform
 
-A powerful, self-hosted dashboard for managing MetaTrader 5 instances with VNC access, trading API, real-time monitoring, notifications, and multi-tenant SaaS architecture.
+Multi-tenant SaaS for operating MetaTrader 5 trade routers: manage MT5 instances
+(Docker containers with VNC access), trade through a REST + WebSocket API, copy
+trades between accounts, subscribe to subscriptions, and get alerts via Telegram
+or webhooks.
 
-## 🚀 Features
-
-### Trading
-- **Market Orders**: BUY/SELL with instant execution
-- **Pending Orders**: BUY_LIMIT, SELL_LIMIT, BUY_STOP, BUY_STOP_LIMIT, SELL_STOP_LIMIT
-- **Order Modification**: Modify SL/TP on open positions
-- **Partial Close**: Close partial position volume
-- **Real-time Streaming**: WebSocket for live quotes, candles, ticks
-- **Trade History**: Full deal history with configurable periods
-- **Copy Trading**: Strategy provider/subscriber architecture
-- **Trading Statistics**: Performance metrics, equity curves, symbol breakdown
-- **MT5 Accounts**: Connect/disconnect multiple MT5 accounts with encrypted credentials
-
-### Instance Management
-- **Docker Control**: Create, Start, Stop, Restart, Delete MT5 containers
-- **VNC Access**: Browser-based remote desktop via noVNC
-- **Container Metrics**: CPU, Memory, Network per instance
-- **Logs**: Real-time container log streaming
-
-### Multi-Server SSH Management (v3.0)
-- **SSH Server Connections**: Connect and manage multiple VPS servers
-- **Remote Docker Control**: Deploy MT5 instances across servers
-- **Server Health Monitoring**: Real-time CPU, Memory, Disk metrics
-- **Encrypted Credentials**: SSH keys and passwords stored securely
-- **Server Status**: Online/Offline health checks
-
-### Monitoring & Alerts
-- **System Metrics**: CPU, Memory, Disk with WebSocket streaming
-- **Alert Rules**: Price alerts, position alerts, account alerts
-- **Telegram Integration**: Real-time notifications via Telegram bot
-- **Webhooks**: TradingView and custom webhook support
-
-### SaaS Architecture
-- **Multi-tenant**: Complete user management with roles
-- **API Keys**: Programmatic access with rate limiting
-- **JWT Authentication**: Secure token-based auth
-- **Database Persistence**: SQLite (dev) / PostgreSQL (production)
-- **Rate Limiting**: Per-user/API-key request throttling
-- **Audit Logging**: Track all user actions
-
-### Billing & Subscriptions (v3.0)
-- **Stripe Integration**: Subscription billing with checkout
-- **Tiered Plans**: Free, Basic, Pro, Enterprise
-- **Usage Tracking**: Monitor API calls, servers, instances
-- **Invoicing**: Automatic invoice generation
-- **Customer Portal**: Self-service billing management
-
-### Authentication & Security (v3.0)
-- **Email Verification**: Verify user email addresses
-- **Password Reset**: Secure password recovery via email
-- **2FA/TOTP**: Two-factor authentication with Google Authenticator
-- **Account Lockout**: Brute force protection
-- **Security Dashboard**: View security status
-
-## 🏗️ Architecture
+## Architecture
 
 ```
-MT5 Router SaaS Architecture (v3.0)
-====================================
-
-Frontend (React)          Backend (FastAPI)         MT5 Instances
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────┐
-│ Dashboard UI    │ ───▶ │ REST API        │ ───▶ │ Docker      │
-│ Trading Panel   │      │ WebSocket       │      │ Containers  │
-│ Notifications   │      │ Auth (JWT+API)  │      │ (mt5linux)  │
-│ Server Mgmt     │      │ Rate Limiter    │      │             │
-│ Billing Panel   │      │ 2FA/TOTP        │      └─────────────┘
-└─────────────────┘      └────────┬────────┘
-                                  │
-                       ┌──────────┴──────────┐
-                       │    PostgreSQL/      │
-                       │     SQLite          │
-                       │ (Users, Alerts,     │
-                       │  Billing, Audit)    │
-                       └─────────────────────┘
-
-External Integrations
-┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│ Telegram    │ │ Webhooks    │ │ Stripe      │ │ SMTP        │
-│ Bot API     │ │(TradingView)│ │ (Billing)   │ │ (Email)     │
-└─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘
-
-Multi-Server Architecture
-┌─────────────────────────────────────────────────────────────┐
-│                     MT5 Router Dashboard                    │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ SSH (paramiko)
-            ┌───────────────┼───────────────┐
-            ▼               ▼               ▼
-    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-    │ Server 1   │ │ Server 2   │ │ Server 3   │
-    │ (Local)    │ │ (VPS)      │ │ (VPS)      │
-    ├────────────┤ ├────────────┤ ├────────────┤
-    │ MT5 × 3   │ │ MT5 × 5   │ │ MT5 × 2   │
-    │ VNC        │ │ VNC        │ │ VNC        │
-    └────────────┘ └────────────┘ └────────────┘
+React + Vite (frontend)  ──REST/WS──▶  FastAPI (backend)
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+              Auth (JWT + API keys)  Trading API           Instance Mgmt
+              Users / admin          Copy trading          Docker + VNC
+              Billing                Statistics            Multi-server SSH
+              Notifications / alerts
+                                          │
+                     SQLite (dev) / PostgreSQL + Redis (prod)
 ```
 
-## 📋 API Endpoints (60+)
+- **Frontend** — React 18 + TypeScript + Vite 5 + Tailwind 3. Served on port
+  `3000` (nginx in Docker). The backend also serves the built frontend from
+  `frontend/dist` when present.
+- **Backend** — Python 3.11 + FastAPI + SQLAlchemy 2 + Alembic. REST + WebSocket
+  API on port `8080`, interactive docs at `/api/docs`, health check at `/api/health`.
+- **MT5 instances** — Docker containers based on `lprett/mt5linux:mt5-installed`,
+  managed by the backend through the Docker socket (or a remote Docker context),
+  with browser-based noVNC access.
+- **Database** — SQLite by default (dev); PostgreSQL 15 + Redis 7 are added by the
+  production compose overlay.
 
-### Authentication
-- POST `/api/v1/auth/register` - Register new user
-- POST `/api/v1/auth/login` - JWT login (with 2FA support)
-- POST `/api/v1/auth/verify-email` - Verify email token
-- POST `/api/v1/auth/forgot-password` - Request password reset
-- POST `/api/v1/auth/reset-password` - Reset password
-- POST `/api/v1/auth/2fa/setup` - Setup 2FA
-- POST `/api/v1/auth/2fa/verify` - Verify 2FA token
-- GET `/api/v1/auth/me` - Get current user
-- POST `/api/v1/users/api-keys` - Create API key
-- GET `/api/v1/users/api-keys` - List API keys
+## Services (compose)
 
-### Trading
-- GET `/api/v1/trading/account` - Account info
-- GET `/api/v1/trading/positions` - Open positions
-- POST `/api/v1/trading/orders` - Place order
-- PUT `/api/v1/trading/positions/{id}/modify` - Modify SL/TP
-- POST `/api/v1/trading/positions/{id}/partial-close` - Partial close
-- GET `/api/v1/trading/symbols/{symbol}/candles` - Candle data
-- WS `/api/v1/trading/ticks` - Real-time ticks
+| Service  | Port          | Notes                                              |
+|----------|---------------|----------------------------------------------------|
+| backend  | 8080 → 8080   | FastAPI; mounts `/var/run/docker.sock`, `./data`, `./logs` |
+| frontend | 3000 → 80     | nginx-served React build                            |
+| postgres | (internal)    | `docker-compose.prod.yml` only, `postgres:15-alpine` |
+| redis    | (internal)    | `docker-compose.prod.yml` only, `redis:7-alpine`     |
 
-### SSH Servers (v3.0)
-- POST `/api/v1/servers` - Add SSH server
-- GET `/api/v1/servers` - List SSH servers
-- PUT `/api/v1/servers/{id}` - Update server
-- DELETE `/api/v1/servers/{id}` - Remove server
-- POST `/api/v1/servers/{id}/health` - Check server health
-- GET `/api/v1/servers/{id}/instances` - List remote instances
-- POST `/api/v1/servers/{id}/instances` - Deploy instance on server
-- POST `/api/v1/servers/{id}/instances/{name}/{action}` - Control remote instance
+## Quick Start
 
-### Billing (v3.0)
-- GET `/api/v1/billing/tiers` - List subscription tiers
-- GET `/api/v1/billing/subscription` - Get current subscription
-- POST `/api/v1/billing/checkout` - Create Stripe checkout
-- GET `/api/v1/billing/portal` - Get customer portal URL
-- POST `/api/v1/billing/cancel` - Cancel subscription
-- POST `/api/v1/billing/reactivate` - Reactivate subscription
-- GET `/api/v1/billing/invoices` - List invoices
-- GET `/api/v1/billing/usage` - Get usage stats
-- POST `/api/v1/billing/webhook` - Stripe webhook
-
-### Notifications
-- POST `/api/v1/notifications/telegram/configure` - Setup Telegram
-- POST `/api/v1/notifications/webhooks` - Add webhook
-- POST `/api/v1/notifications/alerts` - Create alert rule
-- GET `/api/v1/notifications/alerts` - List alerts
-
-### MT5 Accounts
-- GET/POST `/api/v1/accounts` - List/Create MT5 accounts
-- DELETE `/api/v1/accounts/{id}` - Delete account
-- POST `/api/v1/accounts/{id}/connect` - Connect to broker
-- POST `/api/v1/accounts/{id}/disconnect` - Disconnect from broker
-
-### Copy Trading
-- GET/POST `/api/v1/copy/strategies` - List/Create strategies
-- GET/POST `/api/v1/copy/subscribers` - List/Create subscribers
-- GET `/api/v1/copy/signals` - Get signals
-
-### Trading Statistics
-- GET `/api/v1/stats/summary` - Overall performance metrics
-- GET `/api/v1/stats/daily` - Daily breakdown
-- GET `/api/v1/stats/symbols` - Per-symbol stats
-- GET `/api/v1/stats/equity-curve` - Equity curve data
-
-### Webhooks
-- GET `/api/v1/webhooks` - List webhooks
-- POST `/api/v1/webhooks/configure` - Configure webhook
-- POST `/api/v1/webhooks/receive` - Receive external signals
-- DELETE `/api/v1/webhooks/{id}` - Delete webhook
-- POST `/api/v1/webhooks/test/{id}` - Test webhook
-
-### Instances
-- GET/POST `/api/v1/instances` - List/Create instances
-- POST `/api/v1/instances/{id}/start|stop|restart`
-- GET `/api/v1/instances/{id}/logs|stats`
-
-### VNC
-- GET `/api/v1/vnc/{id}/status` - VNC status
-- GET `/api/v1/vnc/{id}/vnc.html` - VNC viewer
-
-## 🚀 Quick Start
-
-### Development
 ```bash
-git clone https://github.com/oyi77/mt5-router.git
-cd mt5-router
-cp .env.example .env
-# Edit .env with your settings
+cp .env.example .env   # edit with your settings (see .env.example for every option)
+```
+
+Base stack (backend + frontend, SQLite):
+```bash
 docker-compose up -d
 ```
 
-### Production
+Development with hot reload (uvicorn `--reload`, `backend/app` and `frontend/src`
+mounted):
 ```bash
-docker-compose --profile production up -d
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
-### Default Credentials
-- Username: `admin`
-- Password: `admin123`
-
-## 🔐 Authentication
-
-### JWT Token
+Local development variant (same as dev, also mounts `frontend/public`):
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/login \
-  -d "username=admin&password=admin123"
+docker-compose -f docker-compose.yml -f docker-compose.local.yml up -d
 ```
 
-### API Key
+Production (PostgreSQL + Redis; `DB_PASSWORD` is required in `.env`):
 ```bash
-curl -H "X-API-Key: mtr_xxxxxxxxxxxx" \
-  http://localhost:8080/api/v1/trading/account
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-## 📱 Telegram Notifications
-1. Create bot via @BotFather
-2. Get chat ID
-3. Configure via dashboard or API
+After starting, open http://localhost:3000 (frontend) and http://localhost:8080/api/docs
+(API docs).
 
-## 📊 Alert Rules
-```json
-{
-  "alert_type": "price",
-  "symbol": "XAUUSD",
-  "condition": "greater_than",
-  "value": 2400,
-  "channel": "telegram"
-}
+### Admin account
+
+No default credentials are seeded. The initial admin account is created at startup
+only when `ADMIN_PASSWORD` is set in `.env` (see `ADMIN_USERNAME`, `ADMIN_EMAIL`,
+`ADMIN_PASSWORD` in `.env.example`). Set a strong password — never hardcode one.
+
+### Docker Socket Access (⚠️ Security Note)
+
+`docker-compose.yml` mounts the host Docker socket (`/var/run/docker.sock`) into
+the backend container. This is load-bearing: the backend uses the socket to create
+and manage MT5 instance containers while `INSTANCE_ORCHESTRATION=docker` (the
+default in `.env.example`).
+
+Because the socket grants the backend full control over the Docker daemon
+(equivalent to root on the host), treat this deployment accordingly:
+
+- Only expose this deployment on networks you trust while the socket is mounted —
+  anyone who can reach the backend can reach the Docker daemon.
+- For multi-tenant / hosted deployments prefer rootless Docker or a remote Docker
+  context and set `INSTANCE_ORCHESTRATION=remote` (no socket mount).
+- If instance orchestration is not used at all, remove the `/var/run/docker.sock`
+  mount from `docker-compose.yml`.
+
+## Configuration
+
+All configuration is environment-based, defined in `backend/app/config.py`
+(pydantic-settings `Settings`) and templated in `.env.example`. Key variables:
+
+| Variable | Default / example | Description |
+|----------|-------------------|-------------|
+| `ENV` | `development` | `development` \| `test` \| `production` (production enables fail-fast secret validation) |
+| `JWT_SECRET` | — | JWT signing secret (≥ 32 chars; required in production) |
+| `ENCRYPTION_KEY` | — | Fernet key for secrets at rest (2FA seeds, webhook targets, SSH keys) |
+| `DATABASE_URL` | `sqlite:///./data/mt5router.db` | SQLite (dev) or `postgresql://...` (prod) |
+| `DB_PASSWORD` | — | Postgres password; required with `postgres://` URLs in production |
+| `INSTANCE_ORCHESTRATION` | `docker` | `docker` (local socket) or `remote` (rootless/remote context) |
+| `MT5_IMAGE` | `lprett/mt5linux:mt5-installed` | Docker image for MT5 instances |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | — | Enable Stripe billing when set |
+| `NOWPAYMENTS_API_KEY` / `NOWPAYMENTS_IPN_SECRET` | — | Enable NOWPayments crypto payments when set |
+| `SMTP_HOST` / `SMTP_USER` / `SMTP_PASSWORD` / `FROM_EMAIL` | — | Email verification / password reset |
+| `TELEGRAM_*`, `WEBHOOK_*`, `REDIS_*`, `RATE_LIMIT_PER_MINUTE`, `CORS_ORIGINS` | — | Notifications, rate limiting, Redis, CORS |
+
+## API Surface
+
+All routes are under `/api/v1`, mounted in `backend/app/main.py`:
+
+- `auth` — register, login, email verification, password reset, 2FA/TOTP
+- `users` — user profile, API keys
+- `instances`, `vnc` — MT5 Docker instance lifecycle and VNC access
+- `trading` — orders, positions, candles, ticks (WebSocket)
+- `monitoring` — system metrics (WebSocket stream)
+- `accounts` — MT5 broker account connections (credentials encrypted at rest)
+- `copy` — copy-trading strategies and subscribers
+- `stats` — trading statistics, equity curves, symbol breakdown
+- `notifications`, `webhooks` — Telegram, alert rules, TradingView/custom webhooks
+- `servers` — multi-server SSH management
+- `billing` — Stripe subscriptions, invoices, usage; NOWPayments crypto payments
+- `admin` — admin management
+
+## Testing & Build
+
+Backend (pytest):
+```bash
+cd backend && python -m pytest tests/ -q
 ```
 
-## 💳 Subscription Tiers
+Frontend (vitest):
+```bash
+cd frontend && npm run test
+```
 
-| Tier | Price | Servers | Instances | API Calls/Day |
-|------|-------|---------|-----------|---------------|
-| Free | $0 | 1 | 1 | 1,000 |
-| Basic | $29/mo | 3 | 5 | 10,000 |
-| Pro | $79/mo | 10 | 25 | 100,000 |
-| Enterprise | Custom | ∞ | ∞ | ∞ |
+Frontend build:
+```bash
+cd frontend && npm run build
+```
 
-## 🔄 WebSocket Connections
-- `/api/v1/monitoring/stream` - Real-time system metrics
-- `/api/v1/trading/ticks` - Real-time price ticks
-
-## 📝 License
-MIT
-
-## 🔗 Links
-- [GitHub](https://github.com/oyi77/mt5-router)
-- [Issues](https://github.com/oyi77/mt5-router/issues)
+CI (`.github/workflows/ci.yml`) runs the backend tests and a flake8 lint
+(`flake8 app/ --select=E9,F63,F7,F82`) on push/PR to `master`.

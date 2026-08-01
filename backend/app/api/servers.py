@@ -1,79 +1,105 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime
+import asyncio
+import logging
 import random
-import docker
 import psutil
 import platform
 
 from app.core.database import get_db
-from app.models.database import SSHServer, ServerMetrics, Instance
+from app.core.docker_client import get_docker_client
+from app.core.exceptions import (
+    BadRequestError,
+    NotFoundError,
+    ServiceUnavailableError,
+)
+from app.models.database import SSHServer, ServerMetrics, Instance, User
 from app.auth.jwt import get_current_user
-from app.services.ssh_service import ssh_service
+from app.services import ssh_service as ssh_module
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+def _require_ssh_service():
+    """Return the live SSH service, or 503 if it was never initialized.
+
+    ``init_ssh_service`` rebinds the module-level ``ssh_service`` global in
+    ``app.services.ssh_service`` during startup, so consumers must read the
+    module attribute at call time instead of importing the name directly
+    (a direct import freezes it at ``None``).
+    """
+    if ssh_module.ssh_service is None:
+        raise ServiceUnavailableError(message="SSH service not initialized")
+    return ssh_module.ssh_service
+
+
+def _collect_local_health() -> dict:
+    """Collect health metrics for the local Docker server."""
+    cpu_percent = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+
+    client = get_docker_client()
+    containers = client.containers.list(
+        all=True, filters={"label": "mt5-router.instance"}
+    )
+
+    instances = []
+    for c in containers:
+        ports = c.ports
+        instances.append(
+            {
+                "id": c.id[:12],
+                "name": c.name,
+                "status": c.status,
+                "rpyc_port": ports.get("18812/tcp", [{}])[0].get("HostPort")
+                if ports.get("18812/tcp")
+                else None,
+                "vnc_port": ports.get("6081/tcp", [{}])[0].get("HostPort")
+                if ports.get("6081/tcp")
+                else None,
+            }
+        )
+
+    return {
+        "server_id": 0,
+        "status": "healthy",
+        "metrics": {
+            "cpu_percent": round(cpu_percent, 1),
+            "memory": {
+                "total": memory.total,
+                "used": memory.used,
+                "percent": round(memory.percent, 1),
+            },
+            "disk": {
+                "total": f"{disk.total / (1024**3):.1f}G",
+                "used": f"{disk.used / (1024**3):.1f}G",
+                "percent": round(disk.percent, 1),
+            },
+            "hostname": platform.node(),
+            "containers_total": len(containers),
+            "containers_running": sum(
+                1 for c in containers if c.status == "running"
+            ),
+        },
+        "instances": instances,
+        "checked_at": datetime.utcnow().isoformat(),
+    }
+
+
 @router.get("/local/health")
-async def local_server_health(user=Depends(get_current_user)):
+async def local_server_health(user: User = Depends(get_current_user)):
     """Get health metrics for the local Docker server."""
     try:
-        cpu_percent = psutil.cpu_percent(interval=1)
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-
-        client = docker.from_env()
-        containers = client.containers.list(
-            all=True, filters={"label": "mt5-router.instance"}
-        )
-
-        instances = []
-        for c in containers:
-            ports = c.ports
-            instances.append(
-                {
-                    "id": c.id[:12],
-                    "name": c.name,
-                    "status": c.status,
-                    "rpyc_port": ports.get("18812/tcp", [{}])[0].get("HostPort")
-                    if ports.get("18812/tcp")
-                    else None,
-                    "vnc_port": ports.get("6081/tcp", [{}])[0].get("HostPort")
-                    if ports.get("6081/tcp")
-                    else None,
-                }
-            )
-
-        return {
-            "server_id": 0,
-            "status": "healthy",
-            "metrics": {
-                "cpu_percent": round(cpu_percent, 1),
-                "memory": {
-                    "total": memory.total,
-                    "used": memory.used,
-                    "percent": round(memory.percent, 1),
-                },
-                "disk": {
-                    "total": f"{disk.total / (1024**3):.1f}G",
-                    "used": f"{disk.used / (1024**3):.1f}G",
-                    "percent": round(disk.percent, 1),
-                },
-                "hostname": platform.node(),
-                "containers_total": len(containers),
-                "containers_running": sum(
-                    1 for c in containers if c.status == "running"
-                ),
-            },
-            "instances": instances,
-            "checked_at": datetime.utcnow().isoformat(),
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to get local server health: {e}"
-        )
+        return await asyncio.to_thread(_collect_local_health)
+    except Exception:
+        logger.error("Failed to get local server health", exc_info=True)
+        raise ServiceUnavailableError(message="Failed to check local server health")
 
 
 class ServerCreate(BaseModel):
@@ -84,6 +110,9 @@ class ServerCreate(BaseModel):
     private_key: Optional[str] = None
     password: Optional[str] = None
     use_key_auth: bool = True
+    # Local socket path (or unix:// URL) by default. ``ssh://user@host[:port]``
+    # remote transports are supported by docker-py (7.x + paramiko installed)
+    # and pass through via ``get_docker_client(base_url=...)``.
     docker_socket: str = "/var/run/docker.sock"
 
 
@@ -143,39 +172,72 @@ def get_ssh_connection(server: SSHServer, service):
     )
 
     if not client:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to connect to {server.host}"
+        raise ServiceUnavailableError(
+            message="Cannot connect to server. Check credentials."
         )
 
     return client
 
 
+def _get_owned_server(db: Session, server_id: int, user) -> SSHServer:
+    server = (
+        db.query(SSHServer)
+        .filter(SSHServer.id == server_id, SSHServer.user_id == user.id)
+        .first()
+    )
+    if not server:
+        raise NotFoundError(message="Server not found")
+    return server
+
+
+def _get_owned_instance(
+    db: Session, server_id: int, instance_name: str, user
+) -> Instance:
+    instance = (
+        db.query(Instance)
+        .filter(
+            Instance.server_id == server_id,
+            Instance.name == instance_name,
+            Instance.user_id == user.id,
+        )
+        .first()
+    )
+    if not instance:
+        raise NotFoundError(message="Instance not found")
+    return instance
+
+
+def _ensure_active(server: SSHServer) -> None:
+    if not server.is_active:
+        raise BadRequestError(message="Server is disabled")
+
+
 @router.post("")
 async def create_server(
     server_data: ServerCreate,
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
+    ssh_service = _require_ssh_service()
 
     private_key_encrypted = None
     password_encrypted = None
 
     if server_data.use_key_auth:
         if not server_data.private_key:
-            raise HTTPException(
-                status_code=400, detail="Private key required for key authentication"
+            raise BadRequestError(
+                message="Private key required for key authentication"
             )
         private_key_encrypted = ssh_service.encrypt_secret(server_data.private_key)
     else:
         if not server_data.password:
-            raise HTTPException(
-                status_code=400, detail="Password required for password authentication"
+            raise BadRequestError(
+                message="Password required for password authentication"
             )
         password_encrypted = ssh_service.encrypt_secret(server_data.password)
 
-    test_client = ssh_service.create_client(
+    test_client = await asyncio.to_thread(
+        ssh_service.create_client,
         host=server_data.host,
         port=server_data.port,
         username=server_data.username,
@@ -185,14 +247,14 @@ async def create_server(
     )
 
     if not test_client:
-        raise HTTPException(
-            status_code=400, detail="Cannot connect to server. Check credentials."
+        raise BadRequestError(
+            message="Cannot connect to server. Check credentials."
         )
 
     test_client.close()
 
     server = SSHServer(
-        user_id=int(user["sub"]),
+        user_id=user.id,
         name=server_data.name,
         host=server_data.host,
         port=server_data.port,
@@ -219,8 +281,8 @@ async def create_server(
 
 
 @router.get("")
-async def list_servers(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    servers = db.query(SSHServer).filter(SSHServer.user_id == int(user["sub"])).all()
+async def list_servers(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    servers = db.query(SSHServer).filter(SSHServer.user_id == user.id).all()
 
     return [
         {
@@ -241,16 +303,9 @@ async def list_servers(user=Depends(get_current_user), db: Session = Depends(get
 
 @router.get("/{server_id}")
 async def get_server(
-    server_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)
+    server_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
-
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    server = _get_owned_server(db, server_id, user)
 
     return {
         "id": server.id,
@@ -271,20 +326,19 @@ async def get_server(
 async def update_server(
     server_id: int,
     update: ServerUpdate,
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
+    if (
+        update.use_key_auth is True
+        and not update.private_key
+        and not server.encrypted_private_key
+    ):
+        raise BadRequestError(message="Private key required for key authentication")
 
     if update.name is not None:
         server.name = update.name
@@ -302,6 +356,8 @@ async def update_server(
         server.use_key_auth = True
     if update.password is not None:
         server.encrypted_password = ssh_service.encrypt_secret(update.password)
+    if update.use_key_auth is not None:
+        server.use_key_auth = update.use_key_auth
 
     db.commit()
     return {"status": "updated"}
@@ -309,16 +365,19 @@ async def update_server(
 
 @router.delete("/{server_id}")
 async def delete_server(
-    server_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)
+    server_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    # Delete child rows first: Instance and ServerMetrics hold FKs to
+    # ssh_servers with no cascade, so deleting the parent first would raise a
+    # foreign-key violation on PostgreSQL.
+    db.query(Instance).filter(Instance.server_id == server.id).delete(
+        synchronize_session=False
+    )
+    db.query(ServerMetrics).filter(ServerMetrics.server_id == server.id).delete(
+        synchronize_session=False
+    )
 
     db.delete(server)
     db.commit()
@@ -327,26 +386,19 @@ async def delete_server(
 
 @router.post("/{server_id}/health")
 async def check_server_health(
-    server_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)
+    server_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
+    _ensure_active(server)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
-
-    client = get_ssh_connection(server, ssh_service)
+    client = await asyncio.to_thread(get_ssh_connection, server, ssh_service)
 
     try:
-        health = ssh_service.check_health(client)
-        metrics = ssh_service.get_server_metrics(client)
-        instances = ssh_service.list_instances(client)
+        health = await asyncio.to_thread(ssh_service.check_health, client)
+        metrics = await asyncio.to_thread(ssh_service.get_server_metrics, client)
+        instances = await asyncio.to_thread(ssh_service.list_instances, client)
 
         server.health_status = health["status"]
         server.last_health_check = datetime.utcnow()
@@ -379,24 +431,17 @@ async def check_server_health(
 
 @router.get("/{server_id}/instances")
 async def list_server_instances(
-    server_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)
+    server_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
+    _ensure_active(server)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
-
-    client = get_ssh_connection(server, ssh_service)
+    client = await asyncio.to_thread(get_ssh_connection, server, ssh_service)
 
     try:
-        instances = ssh_service.list_instances(client)
+        instances = await asyncio.to_thread(ssh_service.list_instances, client)
         return instances
     finally:
         client.close()
@@ -406,37 +451,35 @@ async def list_server_instances(
 async def create_instance_on_server(
     server_id: int,
     instance_data: InstanceCreate,
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
+    _ensure_active(server)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
-
-    client = get_ssh_connection(server, ssh_service)
+    client = await asyncio.to_thread(get_ssh_connection, server, ssh_service)
 
     try:
         instance_name = instance_data.name or f"mt5-{random.randint(1000, 9999)}"
 
-        result = ssh_service.run_mt5_instance(
-            client, instance_name, instance_data.image
+        result = await asyncio.to_thread(
+            ssh_service.run_mt5_instance, client, instance_name, instance_data.image
         )
 
         if not result["success"]:
-            raise HTTPException(status_code=500, detail=result["error"])
+            logger.error(
+                "Failed to create instance: server=%s error=%s",
+                server.id,
+                result.get("error"),
+            )
+            raise ServiceUnavailableError(message="Failed to create instance")
 
         instance = Instance(
-            id=result["container_id"],
+            id=result["container_id"][:12],
             name=instance_name,
-            user_id=int(user["sub"]),
+            user_id=user.id,
             server_id=server.id,
             docker_container_id=result["container_id"],
             status="running",
@@ -463,25 +506,33 @@ async def control_instance_on_server(
     server_id: int,
     instance_name: str,
     action: str,
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
+    _ensure_active(server)
+    _get_owned_instance(db, server_id, instance_name, user)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
-
-    client = get_ssh_connection(server, ssh_service)
+    client = await asyncio.to_thread(get_ssh_connection, server, ssh_service)
 
     try:
-        result = ssh_service.control_instance(client, instance_name, action)
+        result = await asyncio.to_thread(
+            ssh_service.control_instance, client, instance_name, action
+        )
+
+        if not result["success"]:
+            logger.error(
+                "Failed to control instance: server=%s instance=%s action=%s error=%s",
+                server.id, instance_name, action, result.get("error"),
+            )
+            return {
+                "success": False,
+                "action": action,
+                "output": result.get("output", ""),
+                "error": "Failed to control instance",
+            }
         return result
     finally:
         client.close()
@@ -492,25 +543,21 @@ async def get_instance_logs(
     server_id: int,
     instance_name: str,
     lines: int = Query(100, ge=1, le=10000),
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    server = (
-        db.query(SSHServer)
-        .filter(SSHServer.id == server_id, SSHServer.user_id == int(user["sub"]))
-        .first()
-    )
+    server = _get_owned_server(db, server_id, user)
+    _ensure_active(server)
+    _get_owned_instance(db, server_id, instance_name, user)
 
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
+    ssh_service = _require_ssh_service()
 
-    if not ssh_service:
-        raise HTTPException(status_code=500, detail="SSH service not initialized")
-
-    client = get_ssh_connection(server, ssh_service)
+    client = await asyncio.to_thread(get_ssh_connection, server, ssh_service)
 
     try:
-        logs = ssh_service.get_instance_logs(client, instance_name, lines)
+        logs = await asyncio.to_thread(
+            ssh_service.get_instance_logs, client, instance_name, lines
+        )
         return {"logs": logs.split("\n")}
     finally:
         client.close()

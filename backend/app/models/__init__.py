@@ -1,4 +1,4 @@
-from app.models.database import (
+from app.models.database import (  # noqa: F401
     Base,
     User,
     ApiKey,
@@ -7,5 +7,16 @@ from app.models.database import (
     Alert,
     AuditLog,
     UsageRecord,
+    SSHServer,
+    ServerMetrics,
+    Subscription,
+    SubscriptionTier,
+    Invoice,
+    CopyStrategy,
+    CopySubscriber,
+    CopySignal,
+    CopyPosition,
+    InstanceMetrics,
+    WebhookConfig,
     UserRole,
 )

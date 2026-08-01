@@ -173,7 +173,7 @@ export function Dashboard() {
 
   const modifyPosition = useMutation({
     mutationFn: ({ ticket, sl, tp }: { ticket: number; sl: number | null; tp: number | null }) =>
-      tradingApi.modifyPosition(selectedInstance!, ticket, { sl: sl ?? undefined, tp: tp ?? undefined }),
+      tradingApi.modifyPosition(selectedInstance!, ticket, { sl, tp }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['positions', selectedInstance] }),
   })
 
@@ -432,6 +432,7 @@ export function Dashboard() {
                   <AccountCard account={account || null} />
                   <PositionsTable
                     positions={positions}
+                    currency={account?.currency}
                     onClosePosition={(ticket) => closePosition.mutate(ticket)}
                     onModifyPosition={(ticket, sl, tp) => modifyPosition.mutate({ ticket, sl, tp })}
                     onPartialClose={(ticket, volume) => partialClosePosition.mutate({ ticket, volume })}

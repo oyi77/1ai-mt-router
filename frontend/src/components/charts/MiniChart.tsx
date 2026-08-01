@@ -40,6 +40,10 @@ export function MiniChart({
 
   const colorScheme = COLORS[color as keyof typeof COLORS] || COLORS.green
 
+  // Filter out non-finite values up front so NaN/Infinity can never reach the
+  // canvas math below (Math.min/max would propagate them into scale bounds).
+  const points = data.filter(d => Number.isFinite(d.value))
+
   const drawChart = useCallback(() => {
     const canvas = canvasRef.current
     const container = containerRef.current
@@ -64,7 +68,7 @@ export function MiniChart({
     const chartW = width - padding.left - padding.right
     const chartH = height - padding.top - padding.bottom
 
-    if (data.length === 0) {
+    if (points.length === 0) {
       ctx.fillStyle = '#6b7280'
       ctx.font = '13px system-ui, sans-serif'
       ctx.textAlign = 'center'
@@ -72,7 +76,8 @@ export function MiniChart({
       return
     }
 
-    const values = data.map(d => d.value)
+    const n = points.length
+    const values = points.map(d => d.value)
     let minVal = Math.min(...values)
     let maxVal = Math.max(...values)
 
@@ -85,7 +90,7 @@ export function MiniChart({
     minVal = Math.max(0, minVal - valRange * 0.05)
     maxVal = maxVal + valRange * 0.05
 
-    const toX = (i: number) => padding.left + (i / (data.length - 1)) * chartW
+    const toX = (i: number) => padding.left + (n === 1 ? chartW / 2 : (i / (n - 1)) * chartW)
     const toY = (v: number) => padding.top + chartH - ((v - minVal) / (maxVal - minVal)) * chartH
 
     // Grid lines
@@ -112,20 +117,20 @@ export function MiniChart({
     ctx.fillStyle = '#6b7280'
     ctx.font = '10px system-ui, sans-serif'
     ctx.textAlign = 'center'
-    const labelCount = Math.min(5, data.length)
+    const labelCount = Math.min(5, n)
     for (let i = 0; i < labelCount; i++) {
-      const idx = Math.floor((i / (labelCount - 1)) * (data.length - 1))
+      const idx = labelCount === 1 ? 0 : Math.floor((i / (labelCount - 1)) * (n - 1))
       const x = toX(idx)
-      ctx.fillText(formatTimeLabel(data[idx].time), x, height - 4)
+      ctx.fillText(formatTimeLabel(points[idx].time), x, height - 4)
     }
 
     // Filled area
     ctx.beginPath()
-    ctx.moveTo(toX(0), toY(data[0].value))
-    for (let i = 1; i < data.length; i++) {
-      ctx.lineTo(toX(i), toY(data[i].value))
+    ctx.moveTo(toX(0), toY(points[0].value))
+    for (let i = 1; i < n; i++) {
+      ctx.lineTo(toX(i), toY(points[i].value))
     }
-    ctx.lineTo(toX(data.length - 1), padding.top + chartH)
+    ctx.lineTo(toX(n - 1), padding.top + chartH)
     ctx.lineTo(toX(0), padding.top + chartH)
     ctx.closePath()
     ctx.fillStyle = colorScheme.fill
@@ -133,9 +138,9 @@ export function MiniChart({
 
     // Line
     ctx.beginPath()
-    ctx.moveTo(toX(0), toY(data[0].value))
-    for (let i = 1; i < data.length; i++) {
-      ctx.lineTo(toX(i), toY(data[i].value))
+    ctx.moveTo(toX(0), toY(points[0].value))
+    for (let i = 1; i < n; i++) {
+      ctx.lineTo(toX(i), toY(points[i].value))
     }
     ctx.strokeStyle = colorScheme.line
     ctx.lineWidth = 2
@@ -144,21 +149,19 @@ export function MiniChart({
     ctx.stroke()
 
     // Current value dot
-    if (data.length > 0) {
-      const lastIdx = data.length - 1
-      const lx = toX(lastIdx)
-      const ly = toY(data[lastIdx].value)
+    const lastIdx = n - 1
+    const lx = toX(lastIdx)
+    const ly = toY(points[lastIdx].value)
 
-      ctx.beginPath()
-      ctx.arc(lx, ly, 4, 0, Math.PI * 2)
-      ctx.fillStyle = colorScheme.line
-      ctx.fill()
-      ctx.beginPath()
-      ctx.arc(lx, ly, 2, 0, Math.PI * 2)
-      ctx.fillStyle = '#ffffff'
-      ctx.fill()
-    }
-  }, [data, height, showGrid, colorScheme])
+    ctx.beginPath()
+    ctx.arc(lx, ly, 4, 0, Math.PI * 2)
+    ctx.fillStyle = colorScheme.line
+    ctx.fill()
+    ctx.beginPath()
+    ctx.arc(lx, ly, 2, 0, Math.PI * 2)
+    ctx.fillStyle = '#ffffff'
+    ctx.fill()
+  }, [points, height, showGrid, colorScheme])
 
   useEffect(() => {
     drawChart()
@@ -168,7 +171,7 @@ export function MiniChart({
     return () => window.removeEventListener('resize', handleResize)
   }, [drawChart])
 
-  const currentValue = data.length > 0 ? data[data.length - 1].value : null
+  const currentValue = points.length > 0 ? points[points.length - 1].value : null
 
   return (
     <div className="space-y-1">

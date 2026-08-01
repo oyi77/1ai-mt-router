@@ -66,3 +66,7 @@ export const billingApi = {
   getInvoices: (limit: number = 10) =>
     api.get<Invoice[]>(`/billing/invoices?limit=${limit}`),
 }
+
+// Backend prices and invoice amounts are integer cents — never divide in the
+// API layer; use this for display only.
+export const formatCents = (cents: number): string => `$${(cents / 100).toFixed(2)}`

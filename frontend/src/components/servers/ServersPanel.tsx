@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { serversApi, ServerHealth } from '@/api/servers'
+import { serversApi, ServerHealth, SSHServer } from '@/api/servers'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { AlertDialog } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import {
@@ -27,6 +28,8 @@ export function ServersPanel() {
     password: '',
     use_key_auth: true
   })
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<SSHServer | null>(null)
 
   const { data: servers = [], isLoading } = useQuery({
     queryKey: ['servers'],
@@ -42,15 +45,22 @@ export function ServersPanel() {
   const createServer = useMutation({
     mutationFn: serversApi.create,
     onSuccess: () => {
+      setActionError(null)
       queryClient.invalidateQueries({ queryKey: ['servers'] })
       setShowAddForm(false)
       setNewServer({ name: '', host: '', port: 22, username: 'root', private_key: '', password: '', use_key_auth: true })
-    }
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const deleteServer = useMutation({
     mutationFn: serversApi.delete,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
+    onSuccess: () => {
+      setActionError(null)
+      setDeleteTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['servers'] })
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const checkHealth = useMutation({
@@ -65,7 +75,7 @@ export function ServersPanel() {
         try {
           results[server.id] = await serversApi.checkHealth(server.id)
         } catch (e) {
-          results[server.id] = { server_id: server.id, status: 'error', metrics: null, instances: [], checked_at: new Date().toISOString() } as any
+          results[server.id] = { server_id: server.id, status: 'error', metrics: null, instances: [], checked_at: new Date().toISOString() } as ServerHealth
         }
       }
       return results
@@ -87,6 +97,7 @@ export function ServersPanel() {
 
   return (
     <div className="space-y-4">
+      {actionError && <p className="text-sm text-destructive">{actionError}</p>}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="flex items-center gap-2">
@@ -101,7 +112,7 @@ export function ServersPanel() {
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
             </Button>
-            <Button size="sm" onClick={() => setShowAddForm(!showAddForm)}>
+            <Button size="sm" onClick={() => { setActionError(null); setShowAddForm(!showAddForm) }}>
               <Plus className="h-4 w-4 mr-2" />
               Add Server
             </Button>
@@ -287,7 +298,7 @@ export function ServersPanel() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <Badge variant={getStatusColor(server.health_status) as any}>
+                        <Badge variant={getStatusColor(server.health_status)}>
                           {server.health_status}
                         </Badge>
                         <Button size="sm" variant="outline" onClick={() => checkHealth.mutate(server.id)}>
@@ -296,7 +307,7 @@ export function ServersPanel() {
                         <Button size="sm" variant="outline" onClick={() => setExpandedServer(isExpanded ? null : server.id)}>
                           {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                         </Button>
-                        <Button size="sm" variant="destructive" onClick={() => deleteServer.mutate(server.id)}>
+                        <Button size="sm" variant="destructive" onClick={() => { setActionError(null); setDeleteTarget(server) }}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
@@ -375,6 +386,17 @@ export function ServersPanel() {
           </CardContent>
         </Card>
       )}
+
+      <AlertDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete Server"
+        description={deleteTarget ? `Delete "${deleteTarget.name}"?` : ''}
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => deleteTarget && deleteServer.mutate(deleteTarget.id)}
+        isLoading={deleteServer.isPending}
+      />
     </div>
   )
 }

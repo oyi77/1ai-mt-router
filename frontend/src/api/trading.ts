@@ -67,12 +67,20 @@ export interface SymbolInfo {
 }
 
 export interface ModifyPositionRequest {
-  sl?: number
-  tp?: number
+  sl?: number | null
+  tp?: number | null
 }
 
 export interface PartialCloseRequest {
   volume: number
+}
+
+export interface PartialCloseResult {
+  ticket: number
+  closed_volume: number
+  remaining_volume: number
+  price: number
+  status: string
 }
 
 export interface CandleData {
@@ -128,8 +136,9 @@ export const tradingApi = {
     api.put<{ status: string }>(`/trading/positions/${ticket}/modify?instance_id=${instanceId}`, data),
   
   partialClosePosition: (instanceId: string, ticket: number, volume: number) =>
-    api.post<{ status: string; closed_volume: number }>(
-      `/trading/positions/${ticket}/partial-close?instance_id=${instanceId}&volume=${volume}`
+    api.post<PartialCloseResult>(
+      `/trading/positions/${ticket}/partial-close?instance_id=${instanceId}`,
+      { volume }
     ),
   
   modifyOrder: (instanceId: string, ticket: number, data: { price?: number; sl?: number; tp?: number }) =>

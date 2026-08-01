@@ -3,8 +3,14 @@ version: '3.8'
 services:
   backend:
     environment:
+      - ENV=production
       - DEBUG=false
-      - DATABASE_URL=postgresql://mt5router:${DB_PASSWORD:-changeme}@postgres:5432/mt5router
+      - DATABASE_URL=postgresql://mt5router:${DB_PASSWORD:?DB_PASSWORD is required in production}@postgres:5432/mt5router
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required in production}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required in production}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required in production}
+      - CORS_ORIGINS=${CORS_ORIGINS:?CORS_ORIGINS is required in production}
+      - ROLE=worker
     restart: always
     deploy:
       resources:
@@ -24,7 +30,7 @@ services:
     environment:
       - POSTGRES_DB=mt5router
       - POSTGRES_USER=mt5router
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-changeme}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required in production}
     networks:
       - mt5-network
     deploy:
@@ -41,6 +47,11 @@ services:
       - redis_data:/data
     networks:
       - mt5-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
 
 volumes:
   postgres_data:

@@ -1,20 +1,21 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, BeforeValidator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.rbac import require_admin
+from app.core.audit import write_audit_log
 from app.core.database import get_db
+from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.database import (
     Instance,
     Invoice,
     SSHServer,
-    Subscription,
     User,
 )
 from app.services.billing_service import TIER_CONFIGS
@@ -30,6 +31,21 @@ TIER_OVERRIDES_PATH = os.path.join(
     "data",
     "tier_overrides.json",
 )
+
+
+def _reject_bool(v):
+    """Reject bools before pydantic's lax coercion turns them into 1/0.
+
+    Pydantic v2 coerces JSON true/false to int 1/0 for ``int`` fields, so a
+    handler-level ``type(...) is not int`` check never fires for bools. This
+    validator runs before the int coercion and raises instead.
+    """
+    if type(v) is bool:
+        raise ValueError("must be a non-negative integer (cents)")
+    return v
+
+
+StrictInt = Annotated[int, BeforeValidator(_reject_bool)]
 
 
 class UserOut(BaseModel):
@@ -56,8 +72,8 @@ class UserUpdate(BaseModel):
 
 
 class TierUpdate(BaseModel):
-    price_monthly: Optional[int] = None
-    price_yearly: Optional[int] = None
+    price_monthly: Optional[StrictInt] = None
+    price_yearly: Optional[StrictInt] = None
     limits: Optional[Dict[str, Any]] = None
     features: Optional[List[str]] = None
 
@@ -155,9 +171,7 @@ def get_user(
     """Get a single user by ID."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found", code="user_not_found")
     return UserOut.model_validate(user)
 
 
@@ -171,35 +185,46 @@ def update_user(
     """Update user fields (role, is_active, full_name)."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found", code="user_not_found")
 
-    # Prevent admin from demoting themselves
+    # Prevent admin from changing their own admin role
     if str(user.id) == current_user.get("sub") and payload.role and payload.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot change your own admin role",
-        )
+        raise BadRequestError("Cannot change your own admin role", code="self_role_change")
+
+    changed = {}
 
     if payload.role is not None:
         valid_roles = {"admin", "user", "api_only"}
         if payload.role not in valid_roles:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}",
+            raise BadRequestError(
+                f"Invalid role. Must be one of: {', '.join(valid_roles)}",
+                code="invalid_role",
             )
         user.role = payload.role
+        changed["role"] = payload.role
 
     if payload.is_active is not None:
         user.is_active = payload.is_active
+        changed["is_active"] = payload.is_active
 
     if payload.full_name is not None:
         user.full_name = payload.full_name
+        changed["full_name"] = payload.full_name
 
     user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
+
+    if changed:
+        write_audit_log(
+            db,
+            action="admin.user.updated",
+            user_id=int(current_user.get("sub")),
+            resource_type="user",
+            resource_id=str(user.id),
+            details=changed,
+        )
+
     return UserOut.model_validate(user)
 
 
@@ -209,23 +234,26 @@ def delete_user(
     current_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Delete a user permanently."""
+    """Soft-delete a user by deactivating their account."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found", code="user_not_found")
 
     # Prevent admin from deleting themselves
     if str(user.id) == current_user.get("sub"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete your own account",
-        )
+        raise BadRequestError("Cannot delete your own account", code="self_delete")
 
-    db.delete(user)
+    user.is_active = False
+    user.updated_at = datetime.utcnow()
     db.commit()
-    return {"detail": "User deleted successfully"}
+    write_audit_log(
+        db,
+        action="admin.user.deactivated",
+        user_id=int(current_user.get("sub")),
+        resource_type="user",
+        resource_id=str(user.id),
+    )
+    return {"detail": "User deactivated successfully"}
 
 
 @router.post("/users/{user_id}/ban", response_model=UserOut)
@@ -237,20 +265,22 @@ def ban_user(
     """Ban a user by setting is_active to False."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found", code="user_not_found")
 
     if str(user.id) == current_user.get("sub"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot ban your own account",
-        )
+        raise BadRequestError("Cannot ban your own account", code="self_ban")
 
     user.is_active = False
     user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
+    write_audit_log(
+        db,
+        action="admin.user.banned",
+        user_id=int(current_user.get("sub")),
+        resource_type="user",
+        resource_id=str(user.id),
+    )
     return UserOut.model_validate(user)
 
 
@@ -263,14 +293,19 @@ def unban_user(
     """Unban a user by setting is_active to True."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found", code="user_not_found")
 
     user.is_active = True
     user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
+    write_audit_log(
+        db,
+        action="admin.user.unbanned",
+        user_id=int(current_user.get("sub")),
+        resource_type="user",
+        resource_id=str(user.id),
+    )
     return UserOut.model_validate(user)
 
 
@@ -298,6 +333,7 @@ def update_tier(
     tier_name: str,
     payload: TierUpdate,
     current_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     """
     Update tier pricing, limits, or features.
@@ -307,27 +343,66 @@ def update_tier(
     at read time.
     """
     if tier_name not in TIER_CONFIGS:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Tier '{tier_name}' not found. Valid tiers: {', '.join(TIER_CONFIGS.keys())}",
+        raise NotFoundError(
+            f"Tier '{tier_name}' not found. Valid tiers: {', '.join(TIER_CONFIGS.keys())}",
+            code="tier_not_found",
         )
 
     overrides = _load_tier_overrides()
     tier_override = overrides.get(tier_name, {})
+    changed = {}
 
     if payload.price_monthly is not None:
+        # type() is not int rejects bool (a subclass of int) so a JSON
+        # true/false cannot silently become 1/0. The schema-level
+        # StrictInt validator already rejects bools; this is defense-in-depth.
+        if type(payload.price_monthly) is not int or payload.price_monthly < 0:
+            raise BadRequestError(
+                "price_monthly must be a non-negative integer (cents)",
+                code="invalid_price",
+            )
         tier_override["price_monthly"] = payload.price_monthly
+        changed["price_monthly"] = payload.price_monthly
     if payload.price_yearly is not None:
+        # type() is not int rejects bool (a subclass of int) so a JSON
+        # true/false cannot silently become 1/0. The schema-level
+        # StrictInt validator already rejects bools; this is defense-in-depth.
+        if type(payload.price_yearly) is not int or payload.price_yearly < 0:
+            raise BadRequestError(
+                "price_yearly must be a non-negative integer (cents)",
+                code="invalid_price",
+            )
         tier_override["price_yearly"] = payload.price_yearly
+        changed["price_yearly"] = payload.price_yearly
     if payload.limits is not None:
         existing_limits = tier_override.get("limits", {})
+        for key, value in payload.limits.items():
+            # Strict check: type() is not int rejects bool (a subclass of
+            # int), so a JSON true/false cannot silently become 1/0.
+            if type(value) is not int:
+                raise BadRequestError(
+                    f"limit '{key}' must be an integer",
+                    code="invalid_limit",
+                )
         existing_limits.update(payload.limits)
         tier_override["limits"] = existing_limits
+        changed["limits"] = payload.limits
     if payload.features is not None:
         tier_override["features"] = payload.features
+        changed["features"] = payload.features
 
     overrides[tier_name] = tier_override
     _save_tier_overrides(overrides)
+
+    if changed:
+        write_audit_log(
+            db,
+            action="admin.tier.updated",
+            user_id=int(current_user.get("sub")),
+            resource_type="tier",
+            resource_id=tier_name,
+            details=changed,
+        )
 
     # Return the effective merged config
     effective = _get_effective_tiers()
@@ -353,7 +428,7 @@ def get_analytics(
 
     total_users = db.query(func.count(User.id)).scalar() or 0
     active_users = (
-        db.query(func.count(User.id)).filter(User.is_active == True).scalar() or 0
+        db.query(func.count(User.id)).filter(User.is_active.is_(True)).scalar() or 0
     )
 
     total_instances = db.query(func.count(Instance.id)).scalar() or 0

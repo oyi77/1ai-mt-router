@@ -3,7 +3,7 @@ import { api } from './client'
 export interface Instance {
   id: string
   name: string
-  status: 'running' | 'stopped' | 'restarting' | 'created'
+  status: 'running' | 'stopped' | 'restarting' | 'created' | 'exited' | 'paused' | 'dead'
   image: string
   created: string
   rpyc_port: string | null

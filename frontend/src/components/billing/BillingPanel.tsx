@@ -7,11 +7,12 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { CreditCard, Check } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, formatCents } from '@/lib/utils'
 
 export function BillingPanel() {
   const queryClient = useQueryClient()
   const [billingPeriod, setBillingPeriod] = useState<'monthly' | 'yearly'>('monthly')
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const { data: subscription, isLoading: subLoading } = useQuery({
     queryKey: ['subscription'],
@@ -39,17 +40,26 @@ export function BillingPanel() {
       billingApi.createCheckout(tier, period),
     onSuccess: (data) => {
       window.location.href = data.url
-    }
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const cancelSubscription = useMutation({
     mutationFn: () => billingApi.cancelSubscription(false),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscription'] }),
+    onSuccess: () => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['subscription'] })
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const reactivate = useMutation({
     mutationFn: billingApi.reactivateSubscription,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscription'] }),
+    onSuccess: () => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['subscription'] })
+    },
+    onError: (e: Error) => setActionError(e.message),
   })
 
   const isLoading = subLoading || usageLoading || tiersLoading
@@ -81,6 +91,7 @@ export function BillingPanel() {
 
   return (
     <div className="space-y-6">
+      {actionError && <p className="text-sm text-destructive">{actionError}</p>}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -178,7 +189,7 @@ export function BillingPanel() {
                   <CardTitle>{tier.name}</CardTitle>
                   <CardDescription>
                     <span className="text-3xl font-bold text-foreground">
-                      {price === 0 ? 'Free' : `$${price.toFixed(0)}`}
+                      {price === 0 ? 'Free' : formatCents(price)}
                     </span>
                     {price > 0 && (
                       <span className="text-muted-foreground">/{billingPeriod === 'monthly' ? 'mo' : 'yr'}</span>

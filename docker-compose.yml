@@ -17,6 +17,14 @@ services:
       - .env
     networks:
       - mt5-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   frontend:
     build:
@@ -30,6 +38,11 @@ services:
       - backend
     networks:
       - mt5-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
 
 volumes:
   postgres_data:

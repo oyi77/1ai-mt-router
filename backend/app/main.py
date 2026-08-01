@@ -1,10 +1,14 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
+from typing import Optional
+
+import bcrypt
 
 from app.config import settings
 from app.api import (
@@ -24,22 +28,101 @@ from app.api import (
     webhooks,
 )
 from app.models.database import Base
-from app.core.database import engine
+from app.core.database import engine, SessionLocal
+from app.core.http import register_exception_handlers
+from app.core.logging import setup_logging, RequestIdMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.services.ssh_service import init_ssh_service
 from app.services.billing_service import init_billing_service
 from app.services.nowpayments_service import init_nowpayments_service
+from app.services.auth_enhancement_service import init_auth_enhancement_service
+from app.services.alert_engine import alert_engine
+from app.services.notification_service import notification_service
 from app.services.metrics_collector import (
     start_metrics_collector,
     stop_metrics_collector,
 )
 
-logging.basicConfig(level=logging.INFO)
+# Structured JSON logging + request-id support (replaces logging.basicConfig).
+# setup_logging is idempotent and safe to call at import time; it reconfigures
+# the root logger once instead of relying on basicConfig.
+setup_logging()
 logger = logging.getLogger(__name__)
+
+# Queue consumed by the notification dispatch loop. Producers (alert engine,
+# trading events) put (event, data, channels) tuples here so dispatch never
+# blocks the producer.
+_notification_queue: Optional[asyncio.Queue] = None
+
+
+async def _webhook_dispatch_loop(queue: asyncio.Queue):
+    while True:
+        try:
+            event, data, channels = await queue.get()
+            await notification_service.notify(event, data, channels)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Notification dispatch failed: {exc}")
+
+
+async def _alert_engine_loop():
+    # Ticker loop keeping the alert engine alive on the cooldown cadence.
+    # Actual rule evaluation (market data, account snapshots) is owned by the
+    # alert subsystem; this just wakes the engine so it can run checks.
+    while alert_engine.running:
+        try:
+            await asyncio.sleep(settings.ALERT_COOLDOWN)
+        except asyncio.CancelledError:
+            raise
+
+
+def _bootstrap_admin() -> None:
+    """Create the first-run admin account when ADMIN_* settings are configured.
+
+    No-op unless all three of ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD
+    are set. The account is created once and never overwritten on later
+    startups.
+    """
+    if not (
+        settings.ADMIN_USERNAME and settings.ADMIN_EMAIL and settings.ADMIN_PASSWORD
+    ):
+        return
+    from app.models.database import User, UserRole
+
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(User).filter(User.username == settings.ADMIN_USERNAME).first()
+        )
+        if existing is not None:
+            return
+        db.add(
+            User(
+                email=settings.ADMIN_EMAIL,
+                username=settings.ADMIN_USERNAME,
+                hashed_password=bcrypt.hashpw(
+                    settings.ADMIN_PASSWORD.encode("utf-8"), bcrypt.gensalt()
+                ).decode("utf-8"),
+                full_name="Administrator",
+                role=UserRole.ADMIN.value,
+                is_active=True,
+                is_verified=True,
+            )
+        )
+        db.commit()
+        logger.info(f"Created admin account '{settings.ADMIN_USERNAME}'")
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to bootstrap admin account")
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _bootstrap_admin()
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
 
     if settings.ENCRYPTION_KEY:
@@ -58,12 +141,37 @@ async def lifespan(app: FastAPI):
         )
         logger.info("NOWPayments service initialized")
 
-    start_metrics_collector(interval=60)
+    init_auth_enhancement_service(
+        smtp_host=settings.SMTP_HOST,
+        smtp_port=settings.SMTP_PORT,
+        smtp_user=settings.SMTP_USER,
+        smtp_password=settings.SMTP_PASSWORD,
+        from_email=settings.FROM_EMAIL,
+        base_url=settings.BASE_URL,
+    )
+    logger.info("Auth enhancement service initialized")
+
+    start_metrics_collector(interval=settings.METRICS_INTERVAL)
     logger.info("Metrics collector started")
 
+    global _notification_queue
+    _notification_queue = asyncio.Queue()
+    _dispatch_task = asyncio.create_task(_webhook_dispatch_loop(_notification_queue))
+    alert_engine.start()
+    _alert_task = asyncio.create_task(_alert_engine_loop())
+    logger.info("Notification dispatcher and alert engine started")
+
     yield
-    stop_metrics_collector()
     logger.info("Shutting down...")
+    _dispatch_task.cancel()
+    _alert_task.cancel()
+    for task in (_dispatch_task, _alert_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    alert_engine.stop()
+    stop_metrics_collector()
 
 
 app = FastAPI(
@@ -75,13 +183,24 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
+# Starlette applies middleware LIFO: the LAST add_middleware call ends up
+# OUTERMOST. CORS must be outermost so error responses (e.g. the rate
+# limiter's 429) still carry Access-Control-Allow-* headers for browsers.
+# Request-id first (innermost), rate limit middle, CORS last (outermost).
+origins = settings.cors_origins
+app.add_middleware(RequestIdMiddleware)
+
+app.add_middleware(RateLimitMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials="*" not in origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+register_exception_handlers(app)
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
@@ -152,9 +271,15 @@ if os.path.exists(FRONTEND_DIR):
     @app.get("/{full_path:path}")
     async def serve_frontend(request: Request, full_path: str):
         if full_path.startswith("api/"):
-            return {"detail": "Not Found"}
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
 
-        file_path = os.path.join(FRONTEND_DIR, full_path)
+        # Resolve symlinks / .. before serving so requests cannot escape the
+        # frontend build directory (path traversal).
+        resolved_root = os.path.realpath(FRONTEND_DIR)
+        file_path = os.path.realpath(os.path.join(FRONTEND_DIR, full_path))
+        if os.path.commonpath([resolved_root, file_path]) != resolved_root:
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+
         if full_path and os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
 
