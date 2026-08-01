@@ -57,12 +57,12 @@ class PaymentService:
     ) -> Optional[Dict[str, Any]]:
         """Create an aggregator payment and return payment_url + payment_id."""
         payload = {
+            # ``gateway`` must match a gateway id configured in the aggregator
+            # (its API rejects unknown gateways with 401/400).
             "gateway": self.gateway,
             "amount": int(amount_cents),
             "currency": "usd",
             "callback_url": f"{settings.BASE_URL}/api/v1/payments/webhook",
-            "success_url": f"{settings.BASE_URL}/billing/success",
-            "cancel_url": f"{settings.BASE_URL}/billing/cancel",
             "idempotency_key": f"mtr-{user_id}-{tier}-{billing_period}",
             # Subscription context for the webhook: {user_id}_{tier}_{period}.
             "project_order_id": f"{user_id}_{tier}_{billing_period}",

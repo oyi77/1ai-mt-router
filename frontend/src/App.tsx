@@ -1,5 +1,5 @@
 import { Component, ReactNode } from "react"
-import { Routes, Route, Navigate, useLocation, Link } from "react-router-dom"
+import { Routes, Route, Navigate, useLocation, Link, useSearchParams } from "react-router-dom"
 import { AuthProvider, useAuth } from "@/context/AuthContext"
 import { Landing } from "@/pages/Landing"
 import { Login } from "@/pages/Login"
@@ -91,6 +91,37 @@ function NotFound() {
   )
 }
 
+function BillingSuccessPage() {
+  const [params] = useSearchParams()
+  const paymentId = params.get('payment_id') ?? params.get('session_id')
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="text-center space-y-4">
+        <h1 className="text-2xl font-bold">Payment successful</h1>
+        {paymentId && <p className="text-muted-foreground">Reference: {paymentId}</p>}
+        <p className="text-muted-foreground">Your subscription is being activated.</p>
+        <Link to="/dashboard">
+          <Button>Go to dashboard</Button>
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+function BillingCancelPage() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="text-center space-y-4">
+        <h1 className="text-2xl font-bold">Payment cancelled</h1>
+        <p className="text-muted-foreground">No charges were made. You can try again anytime.</p>
+        <Link to="/dashboard">
+          <Button>Back to dashboard</Button>
+        </Link>
+      </div>
+    </div>
+  )
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -123,6 +154,22 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/billing/success"
+        element={
+          <ProtectedRoute>
+            <BillingSuccessPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/billing/cancel"
+        element={
+          <ProtectedRoute>
+            <BillingCancelPage />
           </ProtectedRoute>
         }
       />

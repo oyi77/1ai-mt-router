@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { billingApi } from '@/api/billing'
+import { paymentsApi } from '@/api/payments'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -12,6 +13,7 @@ import { cn, formatCents } from '@/lib/utils'
 export function BillingPanel() {
   const queryClient = useQueryClient()
   const [billingPeriod, setBillingPeriod] = useState<'monthly' | 'yearly'>('monthly')
+  const [paymentMethod, setPaymentMethod] = useState<'stripe' | '1ai'>('stripe')
   const [actionError, setActionError] = useState<string | null>(null)
 
   const { data: subscription, isLoading: subLoading } = useQuery({
@@ -40,6 +42,15 @@ export function BillingPanel() {
       billingApi.createCheckout(tier, period),
     onSuccess: (data) => {
       window.location.href = data.url
+    },
+    onError: (e: Error) => setActionError(e.message),
+  })
+
+  const createPayment = useMutation({
+    mutationFn: ({ tier, period }: { tier: string; period: 'monthly' | 'yearly' }) =>
+      paymentsApi.createCheckout(tier, period),
+    onSuccess: (data) => {
+      window.location.href = data.payment_url
     },
     onError: (e: Error) => setActionError(e.message),
   })
@@ -149,24 +160,42 @@ export function BillingPanel() {
       </Card>
 
       <div>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <h2 className="text-xl font-bold">Available Plans</h2>
-          <div className="flex gap-1 p-1 bg-muted rounded-lg">
-            <Button
-              size="sm"
-              variant={billingPeriod === 'monthly' ? 'secondary' : 'ghost'}
-              onClick={() => setBillingPeriod('monthly')}
-            >
-              Monthly
-            </Button>
-            <Button
-              size="sm"
-              variant={billingPeriod === 'yearly' ? 'secondary' : 'ghost'}
-              onClick={() => setBillingPeriod('yearly')}
-            >
-              Yearly
-              <Badge variant="outline" className="ml-2 text-xs">-17%</Badge>
-            </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex gap-1 p-1 bg-muted rounded-lg">
+              <Button
+                size="sm"
+                variant={billingPeriod === 'monthly' ? 'secondary' : 'ghost'}
+                onClick={() => setBillingPeriod('monthly')}
+              >
+                Monthly
+              </Button>
+              <Button
+                size="sm"
+                variant={billingPeriod === 'yearly' ? 'secondary' : 'ghost'}
+                onClick={() => setBillingPeriod('yearly')}
+              >
+                Yearly
+                <Badge variant="outline" className="ml-2 text-xs">-17%</Badge>
+              </Button>
+            </div>
+            <div className="flex gap-1 p-1 bg-muted rounded-lg">
+              <Button
+                size="sm"
+                variant={paymentMethod === 'stripe' ? 'secondary' : 'ghost'}
+                onClick={() => setPaymentMethod('stripe')}
+              >
+                Card (Stripe)
+              </Button>
+              <Button
+                size="sm"
+                variant={paymentMethod === '1ai' ? 'secondary' : 'ghost'}
+                onClick={() => setPaymentMethod('1ai')}
+              >
+                1ai Payment
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -208,10 +237,14 @@ export function BillingPanel() {
                   <Button
                     className="w-full"
                     variant={isCurrentPlan ? "outline" : "default"}
-                    disabled={isCurrentPlan || createCheckout.isPending}
+                    disabled={isCurrentPlan || createCheckout.isPending || createPayment.isPending}
                     onClick={() => {
                       if (price === 0) return
-                      createCheckout.mutate({ tier: key, period: billingPeriod })
+                      if (paymentMethod === '1ai') {
+                        createPayment.mutate({ tier: key, period: billingPeriod })
+                      } else {
+                        createCheckout.mutate({ tier: key, period: billingPeriod })
+                      }
                     }}
                   >
                     {isCurrentPlan ? 'Current Plan' : price === 0 ? 'Free Forever' : 'Upgrade'}

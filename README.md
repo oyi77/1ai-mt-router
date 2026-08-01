@@ -108,7 +108,7 @@ All configuration is environment-based, defined in `backend/app/config.py`
 | `MT5_IMAGE` | `lprett/mt5linux:mt5-installed` | Docker image for MT5 instances |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | — | Enable Stripe billing when set |
 | `NOWPAYMENTS_API_KEY` / `NOWPAYMENTS_IPN_SECRET` | — | Enable NOWPayments crypto payments when set |
-| `PAYMENT_API_KEY` / `PAYMENT_BASE_URL` / `PAYMENT_WEBHOOK_SECRET` / `PAYMENT_GATEWAY` | — | Enable 1ai-payment aggregator (multi-gateway) when set |
+| `PAYMENT_API_KEY` / `PAYMENT_BASE_URL` / `PAYMENT_WEBHOOK_SECRET` / `PAYMENT_GATEWAY` | `PAYMENT_BASE_URL=http://localhost:3103` | Enable 1ai-payment aggregator (multi-gateway) when set; `PAYMENT_GATEWAY` must match an aggregator-configured gateway id |
 | `SMTP_HOST` / `SMTP_USER` / `SMTP_PASSWORD` / `FROM_EMAIL` | — | Email verification / password reset |
 | `TELEGRAM_*`, `WEBHOOK_*`, `REDIS_*`, `RATE_LIMIT_PER_MINUTE`, `CORS_ORIGINS` | — | Notifications, rate limiting, Redis, CORS |
 

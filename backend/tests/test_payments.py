@@ -8,14 +8,19 @@ smallest currency unit (integer cents), unlike NOWPayments. Data is seeded
 per-test with unique users, and every request uses a unique
 ``X-Forwarded-For`` so the shared rate-limit bucket never trips.
 """
+import asyncio
 import hashlib
 import hmac
 import json
 import uuid
 
+import httpx
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.auth.jwt import create_access_token
+from app.config import settings
 from app.models.database import AuditLog, Subscription, User
 from app.services.billing_service import TIER_CONFIGS
 from app.services.payment_service import PaymentService
@@ -195,7 +200,7 @@ def test_payment_webhook_underpaid_rejected(client, db, payment_service):
 def test_payment_webhook_valid_signature_activates(client, db, monkeypatch):
     service = PaymentService(
         api_key="test-key",
-        base_url="http://localhost:3100",
+        base_url="http://localhost:3103",
         gateway="nowpayments",
         webhook_secret="test-secret",
     )
@@ -219,7 +224,7 @@ def test_payment_webhook_valid_signature_activates(client, db, monkeypatch):
 def test_payment_webhook_invalid_signature_rejected(client, db, monkeypatch):
     service = PaymentService(
         api_key="test-key",
-        base_url="http://localhost:3100",
+        base_url="http://localhost:3103",
         gateway="nowpayments",
         webhook_secret="test-secret",
     )
@@ -289,3 +294,79 @@ def test_payment_checkout_free_tier_rejected(
     resp = client.post(CHECKOUT_URL, json={"tier": "free"}, headers=headers)
     assert resp.status_code == 400
     assert resp.json()["code"] == "free_tier_checkout"
+
+
+# --- mock replicating the aggregator POST /api/payments contract ---
+_contract_captured: dict = {}
+
+_contract_mock = FastAPI()
+
+
+@_contract_mock.post("/api/payments")
+async def _contract_create_payment(request: Request):
+    _contract_captured["body"] = await request.json()
+    _contract_captured["api_key"] = request.headers.get("X-API-Key")
+    return JSONResponse(
+        {
+            "success": True,
+            "data": {
+                "id": "pay_rt1",
+                "gateway": "nowpayments",
+                "gateway_reference": "gwr_1",
+                "status": "pending",
+                "amount": 9900,
+                "currency": "usd",
+                "payment_method": None,
+                "payment_url": "https://pay.test/rt1",
+                "metadata": None,
+                "created_at": "2026-08-01T00:00:00Z",
+                "updated_at": "2026-08-01T00:00:00Z",
+            },
+        }
+    )
+
+
+def test_payment_create_payment_round_trip_via_contract_mock(monkeypatch):
+    """PaymentService.create_payment matches the aggregator's documented contract.
+
+    The live aggregator (1ai-payment.service, port 3103) is not contacted here;
+    this mock replicates its ``POST /api/payments`` contract, so the request
+    payload and response parsing are verified end-to-end at the HTTP layer.
+    """
+    _contract_captured.clear()
+
+    async def round_trip():
+        transport_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_contract_mock),
+            base_url="http://mock",
+        )
+        # PaymentService builds its own AsyncClient; hand it our mock-backed one.
+        monkeypatch.setattr(
+            "app.services.payment_service.httpx.AsyncClient",
+            lambda: transport_client,
+        )
+        service = PaymentService(
+            api_key="test-key",
+            base_url="http://mock",
+            gateway="nowpayments",
+        )
+        return await service.create_payment(9900, "basic", "monthly", 1)
+
+    result = asyncio.run(round_trip())
+
+    assert result == {
+        "payment_url": "https://pay.test/rt1",
+        "payment_id": "pay_rt1",
+        "gateway": "nowpayments",
+    }
+
+    body = _contract_captured["body"]
+    assert body["gateway"] == "nowpayments"
+    assert body["amount"] == 9900 and isinstance(body["amount"], int)
+    assert body["currency"] == "usd"
+    assert body["callback_url"] == f"{settings.BASE_URL}/api/v1/payments/webhook"
+    # The aggregator silently strips unknown keys; the client must not send
+    # frontend return URLs that no route serves.
+    assert "success_url" not in body
+    assert "cancel_url" not in body
+    assert _contract_captured["api_key"] == "test-key"

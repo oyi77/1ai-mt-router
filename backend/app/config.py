@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     NOWPAYMENTS_SANDBOX: bool = True
 
     # --- 1ai-payment aggregator (multi-gateway payments; optional) ---
-    PAYMENT_BASE_URL: str = "http://localhost:3100"
+    PAYMENT_BASE_URL: str = "http://localhost:3103"
     PAYMENT_API_KEY: str = ""
     PAYMENT_WEBHOOK_SECRET: str = ""
     PAYMENT_GATEWAY: str = "nowpayments"
